@@ -84,6 +84,9 @@ Tilsvarende annotasjoner finnes for ressurser (`@McpResource`) og prompts (`@Mcp
   er git-ignorert; slett den for å nullstille. Skjemaet er idempotent (`IF NOT EXISTS`).
 - **Tester** kjører med MCP-serveren avskrudd (`src/test/resources/application.properties`)
   så `@SpringBootTest` ikke blokkerer på stdin.
+- **Oppstartslogg av verktøy:** `workshop.log-registered-tools=true` (default) skriver
+  navnene på alle `@McpTool` til konsollet ved oppstart (se `RegisteredToolsLogger`). Sett
+  `false` for å skru av. Nyttig for å bekrefte at et nytt verktøy ble plukket opp.
 - **Gradle-wrapperen** er committet (`gradle/wrapper/gradle-wrapper.jar`) — `./gradlew`
   fungerer uten lokal Gradle-installasjon.
 
