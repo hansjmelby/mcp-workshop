@@ -1,1 +1,1 @@
-# mcp-workshop
+# mcp-workshop.
