@@ -20,7 +20,22 @@ gjerne i rekkefølge — senere epics bygger på tidligere. Fasiten ligger på `
 ### T-01 · Bygg, kjør og inspiser skallet
 - **Mål:** Få serveren opp og se eksempel-verktøyet i MCP Inspector.
 - **Akseptkriterier:** `./gradlew build` er grønt; du ser `about_application` i Inspector og får svar når du kaller det.
-- **Hint:** Start Inspector med `npx @modelcontextprotocol/inspector` og pek den på den kjørbare jar-en (`java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar`) som stdio-kommando.
+- **Hint:** Start Inspector og pek den på den kjørbare jar-en som stdio-kommando. Kjør
+  fra prosjektroten, så den relative jar-stien stemmer:
+
+  ```bash
+  npx @modelcontextprotocol/inspector java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
+  ```
+
+  Inspector skriver ut en URL i terminalen med et **auth-token**
+  (`http://localhost:6274/?MCP_PROXY_AUTH_TOKEN=…`) — åpne *akkurat den* URL-en, ellers får
+  du «connection error».
+
+  Hvis du i stedet startet `npx @modelcontextprotocol/inspector` **uten argumenter**, åpner
+  UI-et med tomme felt. Fyll da inn i venstre panel og klikk **Connect**:
+  - **Transport Type:** `STDIO`
+  - **Command:** `java`
+  - **Arguments:** `-jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar`
 - **Slik tester du:** Kall `about_application` fra Inspector og les svaret.
 
 ### T-02 · Koble serveren til Claude
