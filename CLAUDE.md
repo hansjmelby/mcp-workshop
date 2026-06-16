@@ -97,8 +97,18 @@ build.gradle.kts                     # avhengigheter (Spring Boot, Spring AI MCP
 src/main/java/no/computas/vacationmcp/
   VacationBookingMcpApplication.java # @SpringBootApplication
   tools/AboutTool.java               # eksempel-@McpTool
+  domain/                            # records: Destination, Availability, Booking, BookingStatus
+  repository/                        # JdbcTemplate-dataaksess (gitt — ikke skriv om)
+  service/                           # forretningslogikk: Destination/Pricing/BookingService (gitt)
+  config/RegisteredToolsLogger.java  # logger registrerte tools ved oppstart
 src/main/resources/
   application.properties             # MCP stdio + SQLite-config
   schema.sql / data.sql              # ferie-booking-skjema + seed
+src/test/java/.../service/           # tester for forretningslaget
 BACKLOG.md                           # workshop-oppgavene
+
+**Forretningslaget er ferdig.** `repository/` (dataaksess) og `service/` (validering,
+prisberegning med sesongpris-fallback, booking-tilstandsmaskin) er implementert og testet.
+Workshop-oppgavene handler om å *eksponere* disse tjenestene som MCP — ikke å skrive
+forretnings-/DB-kode. Tjenestene kaster `ValidationException`/`NotFoundException` ved feil.
 ```
