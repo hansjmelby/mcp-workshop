@@ -2,6 +2,10 @@
 
 Veiledning for Claude Code (og andre LLM-agenter) som jobber i dette repoet.
 
+> **Denne filen er selvstendig.** All informasjon en agent trenger for å jobbe i repoet
+> ligger her — ikke anta at `README.md` er lest. (`README.md` er for de menneskelige
+> workshop-deltakerne og kan dupliseres herfra, men er ikke en kilde denne filen avhenger av.)
+
 ## Hva dette er
 
 Et **workshop-skall** for å lære å bygge en **MCP-server** (Model Context Protocol).
@@ -10,7 +14,7 @@ tilgjengelighet/priser og opprette bookinger mot en SQLite-database.
 
 Skallet kjører allerede og eksponerer ett eksempel-verktøy (`about_application`).
 Selve læringen skjer ved å jobbe gjennom **[BACKLOG.md](BACKLOG.md)** — en liste med
-oppgaver som gradvis bygger ut serveren. Fasit ligger på `solution`-branchen.
+oppgaver som gradvis bygger ut serveren.
 
 ## Tech stack
 
@@ -74,6 +78,32 @@ public class ExampleTool {
 Mønsteret finnes i [`AboutTool.java`](src/main/java/no/computas/vacationmcp/tools/AboutTool.java).
 Tilsvarende annotasjoner finnes for ressurser (`@McpResource`) og prompts (`@McpPrompt`).
 
+## Forretningstjenester (ferdig — deleger hit)
+
+Forretnings- og datalaget er implementert og testet. Oppgaver skal *eksponere* disse som
+MCP, ikke skrive ny forretnings-/DB-kode. Injiser tjenesten i en `@Component`. Feil
+signaliseres med `ValidationException` (ugyldig input/regelbrudd) og `NotFoundException`.
+
+Domene (`domain/`): records `Destination`, `Availability`, `Booking` + enum `BookingStatus`
+(med `canTransitionTo(...)`; flyt `PENDING → CONFIRMED → PAID → COMPLETED`, alle → `CANCELLED`).
+
+`DestinationService`
+- `List<Destination> listAvailable()`
+- `List<Destination> search(String query, String country, Double maxPricePerNight)` — alle params valgfrie; avviser negativ pris
+
+`PricingService`
+- `Quote quote(long destinationId, LocalDate from, LocalDate to, int numTravelers)` — validerer + beregner (sesongpris ?: pris/natt × netter × reisende)
+- `Availability findCoveringPeriod(long destinationId, LocalDate from, LocalDate to)`
+
+`BookingService`
+- `Booking createBooking(String customerName, long destinationId, LocalDate from, LocalDate to, int numTravelers)` — validering + kapasitet + pris; lagrer som `PENDING`
+- `Booking get(long id)` · `List<Booking> list(BookingStatus status)` (null = alle)
+- `Booking updateStatus(long id, BookingStatus target)` — håndhever tilstandsmaskinen
+- `Booking cancel(long id)`
+
+Lavnivå ved behov: `DestinationRepository`, `AvailabilityRepository`
+(`findOverlapping`/`findCovering`/`findByDestinationId`), `BookingRepository`.
+
 ## Viktige konvensjoner / fallgruver
 
 - **stdio eier stdout.** I stdio-modus går JSON-RPC over stdout, så **all logging må til
@@ -106,9 +136,4 @@ src/main/resources/
   schema.sql / data.sql              # ferie-booking-skjema + seed
 src/test/java/.../service/           # tester for forretningslaget
 BACKLOG.md                           # workshop-oppgavene
-
-**Forretningslaget er ferdig.** `repository/` (dataaksess) og `service/` (validering,
-prisberegning med sesongpris-fallback, booking-tilstandsmaskin) er implementert og testet.
-Workshop-oppgavene handler om å *eksponere* disse tjenestene som MCP — ikke å skrive
-forretnings-/DB-kode. Tjenestene kaster `ValidationException`/`NotFoundException` ved feil.
 ```
