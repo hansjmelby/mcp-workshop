@@ -32,7 +32,23 @@ gjerne i rekkefølge — senere epics bygger på tidligere. Fasiten ligger på `
 
 ---
 
-## Epic 0 — Kom i gang
+## Epic 0 — MCP under panseret og kom i gang
+
+### T-00 · Se MCP-protokollen før du bruker Spring-annotasjoner
+- **Mål:** Forstå den konkrete JSON-RPC-kontrakten som Spring AI lager på dine vegne.
+- **Akseptkriterier:** Du kan peke ut `initialize`, serverens capability-svar,
+  `notifications/initialized` og `tools/list` i en trace. Du kan forklare at
+  `inputSchema` fra `tools/list` er JSON Schema-kontrakten klienten bruker når den kaller et
+  tool.
+- **Gjør dette:** Les «[Før annotasjonene: MCP under panseret](README.md#før-annotasjonene-mcp-under-panseret)»
+  i README og kjør kommandoen der. Se bare på JSON-linjene på stdout; Spring-loggen går til
+  stderr. Sammenlign serverens `capabilities` med det den faktisk tilbyr i skallet:
+  `tools`, `resources`, `prompts`, logging og completions.
+- **Spørsmål å svare på:** Hvorfor har `notifications/initialized` ingen `id` eller respons?
+  Hvorfor har `about_application` tomme `properties` og `required`? Hva forventer du at
+  endrer seg i `inputSchema` når et tool får en obligatorisk parameter?
+- **Slik tester du:** Kjør `tools/list` på nytt etter T-03 eller T-04 og se at JSON Schema
+  nå beskriver argumentene du la til.
 
 ### T-01 · Bygg, kjør og inspiser skallet
 - **Mål:** Få serveren opp og se eksempel-verktøyet i MCP Inspector.

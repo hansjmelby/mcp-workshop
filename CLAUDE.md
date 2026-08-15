@@ -45,15 +45,24 @@ Kjør den ferdige serveren som en stdio-MCP-server:
 java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
 ```
 
-Røyktest av protokollen uten en host (initialize + tools/list + tools/call):
+Røyktest av protokollen uten en host (initialize + capability-forhandling + tools/list).
+Meldingene må komme i denne rekkefølgen; `notifications/initialized` er en notifikasjon og
+har ingen respons:
 
 ```bash
-printf '%s\n' \
-'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
-'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-| java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
+{ \
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'; \
+  sleep 2; \
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'; \
+  sleep 1; \
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; \
+  sleep 2; \
+} | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
 ```
+
+Se README-seksjonen «Før annotasjonene: MCP under panseret» for en faktisk, kommentert trace
+og forklaring av `inputSchema` (JSON Schema). Dette er læringssteg T-00 i BACKLOG.md og skal
+komme før arbeid med `@McpTool`.
 
 ## Slik lager du et MCP-verktøy
 
