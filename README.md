@@ -4,8 +4,9 @@ Lær å bygge en **MCP-server** (Model Context Protocol) ved å bygge ut en ekte
 tjeneste: en **ferie-booking-server** som lar en LLM (f.eks. Claude) søke etter reisemål,
 sjekke tilgjengelighet og priser, og opprette bookinger.
 
-Du starter med et **kjørbart skall** og jobber deg gjennom en **[backlog](BACKLOG.md)** av
-oppgaver som steg for steg legger til verktøy (tools), ressurser (resources) og prompts.
+Du starter med et **kjørbart skall**, ser først MCP-protokollen på ledningen, og jobber deg
+deretter gjennom en **[backlog](BACKLOG.md)** av oppgaver som steg for steg legger til verktøy
+(tools), ressurser (resources) og prompts.
 
 > **Fokuset er MCP, ikke forretningskode.** Hele forretnings- og datalaget (validering,
 > prisberegning, booking-logikk, databaseaksess) er **ferdig implementert og testet**.
@@ -41,6 +42,58 @@ riktig oppførsel for en stdio-server.
 
 Skallet starter med ett eksempel-verktøy, `about_application`, som svarer på hva
 applikasjonen er.
+
+### Før annotasjonene: MCP under panseret
+
+Før du lager et Spring-verktøy, se hva en MCP-klient og server faktisk utveksler. MCP bruker
+**JSON-RPC 2.0**, én JSON-melding per linje over stdio. Start alltid med `initialize`:
+klienten foreslår protokollversjon og beskriver egne capabilities; serveren velger/svarer med
+sin protokollversjon og capabilities. Deretter sender klienten den id-løse notifikasjonen
+`notifications/initialized` før den ber om `tools/list`.
+
+Denne tracen er tatt mot prosjektets nåværende skall (oppstartslogg på stderr er utelatt):
+
+```jsonc
+// klient → server
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"workshop-trace","version":"1.0"}}}
+
+// server → klient: capability-forhandling
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"completions":{},"logging":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true}},"serverInfo":{"name":"vacation-booking-mcp","version":"0.0.1"}}}
+
+// klient → server (notifikasjon har ingen id og får ikke svar)
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+// klient → server
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+// server → klient
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"about_application","title":"about_application","description":"Forklarer hva denne applikasjonen er og hva den brukes til.","inputSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[]},"annotations":{"title":"","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}}]}}
+```
+
+Det siste svaret er kontrakten klienten bruker for å kalle et verktøy. `inputSchema` er
+**JSON Schema**: `type: object` betyr at argumentene sendes som et JSON-objekt;
+`properties` beskriver feltene, og `required` angir obligatoriske felt. Her er begge tomme
+fordi `about_application` ikke har parametere. Når du senere legger til
+`@McpToolParam`, er det Spring AI som av annotasjonen genererer feltene i denne kontrakten.
+Det er derfor verdt å inspisere `tools/list` igjen etter hver ny tool-oppgave.
+
+Du kan gjenskape tracen uten Inspector. Vent mellom meldingene: serveren må ha svart på
+`initialize` før neste forespørsel sendes.
+
+```bash
+{ \
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"trace","version":"1.0"}}}'; \
+  sleep 2; \
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'; \
+  sleep 1; \
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; \
+  sleep 2; \
+} | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
+```
+
+I en vanlig host gjør Inspector eller Claude denne håndtrykksekvensen for deg. Verktøyene er
+fortsatt bare JSON-RPC-metoder; Spring-annotasjonene er den praktiske måten å deklarere
+serverens del av kontrakten på.
 
 ### Verifiser med MCP Inspector
 
