@@ -13,7 +13,7 @@ etterpå. Én commit per oppgave.
 | T-00 | MCP-protokollen under panseret | 📝 | Verifisert trace + capability-analyse + svar ([se under](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner)) |
 | T-01 | Bygg, kjør og inspiser skallet | 📝 | Grønn `clean build` + jar; `about_application` verifisert via stdio og Inspector-CLI; web-UI-et dokumentert ([se under](#t-01--bygg-kjør-og-inspiser-skallet)) |
 | T-02 | Koble serveren til Claude | 📝 | Registrert som stdio-server i Claude Code (`✔ Connected`) og `about_application` kalt gjennom hosten; README-oppskriften verifisert + presisert ([se under](#t-02--koble-serveren-til-claude)) |
-| T-03 | `list_destinations` | ⬜ | — |
+| T-03 | `list_destinations` | ✅ | `tools/DestinationTools.java` → verktøyet `list_destinations`; test `tools/DestinationToolsTest.java` ([se under](#t-03--list_destinations)) |
 | T-04 | `search_destinations` | ⬜ | — |
 | T-05 | `check_availability` | ⬜ | — |
 | T-06 | `get_quote` | ⬜ | — |
@@ -41,6 +41,31 @@ etterpå. Én commit per oppgave.
 - **Feilhåndtering:** `ValidationException`/`NotFoundException` fra tjenestelaget formidles
   som MCP tool-feil (`isError`), ikke som stacktrace.
 - Hver oppgave = én commit med meldingsprefiks `T-xx: …`.
+
+### Struktur for verktøyklasser (etablert i T-03 — følg denne)
+
+- **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
+  med suffikset `Tools`. Planlagt fordeling:
+  `DestinationTools` (T-03 ✅, T-04) · `AvailabilityTools` (T-05) · `PricingTools` (T-06) ·
+  `BookingTools` (T-07–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
+- **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
+  tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
+- **Metodenavnet er camelCase av verktøynavnet** (`list_destinations` → `listDestinations`),
+  og `name` settes alltid eksplisitt i `@McpTool` så snake_case-navnet i protokollen ikke
+  avhenger av Java-metodenavnet.
+- **Returtype = domene-record (eller `List<…>` av dem)**, ikke håndformatert tekst. Spring AI
+  serialiserer alt som ikke er `String` til JSON i tekstblokken
+  (`AbstractMcpToolMethodCallback.convertValueToCallToolResult`). Begrunnelse i T-03-seksjonen.
+- **`annotations`-hintene settes bevisst.** Lesende verktøy:
+  `readOnlyHint = true, destructiveHint = false, idempotentHint = true, openWorldHint = false`.
+  Skrivende verktøy (T-07, T-09, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
+  vurder `destructiveHint` selv. Merk at `destructiveHint` og `idempotentHint` bare er
+  meningsbærende når `readOnlyHint == false`; vi setter dem likevel eksplisitt for å unngå at
+  Spring AI sin default (`destructiveHint = true`) står igjen i katalogen.
+- **`description` er prompt-engineering**: si *hva* verktøyet gir, *når* modellen skal velge
+  det framfor naboverktøyet, hvilke felt som kommer tilbake, og hvilke forbehold som gjelder.
+  Legg til krysshenvisning begge veier når nabo-verktøyet finnes (T-04 bør nevne
+  `list_destinations` og omvendt).
 
 ---
 
@@ -415,3 +440,91 @@ Loggen for host-startede servere: Claude Desktop skriver serverens stderr til
 `~/Library/Logs/Claude/mcp-server-vacation-booking.log`. Uansett host skriver serveren selv
 til `logs/vacation-booking-mcp.log` i prosjektroten — den er den mest praktiske under workshopen,
 siden den finnes uavhengig av hvem som startet prosessen.
+
+### T-03 · `list_destinations`
+
+Første ekte verktøy etter eksempelet. To nye filer, ingen endringer i eksisterende kode:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/tools/DestinationTools.java` | `@Component` med `@McpTool(name = "list_destinations")` → `DestinationService.listAvailable()` |
+| `src/test/java/no/computas/vacationmcp/tools/DestinationToolsTest.java` | `@SpringBootTest` som verifiserer de 5 seedede reisemålene |
+
+Metoden er tre linjer inkludert `return` — all logikk ligger allerede i tjenestelaget, og
+verktøyet gjør ingenting annet enn å delegere. Klassen heter `DestinationTools` (flertall)
+fordi T-04 (`search_destinations`) skal inn i **samme** klasse; se «Struktur for
+verktøyklasser» over for resten av fordelingen.
+
+#### Designvalg: domene-record som JSON, ikke formatert tekst
+
+Metoden returnerer `List<Destination>` — domene-recorden rett fra tjenesten. Spring AI ser at
+returtypen ikke er `String` og serialiserer den til JSON i tekstblokken av `CallToolResult`
+(`AbstractMcpToolMethodCallback.convertValueToCallToolResult`: `String` går uendret ut, alt
+annet gjennom `jsonHelper.toJson`). Modellen får dermed:
+
+```json
+[{"id":1,"name":"Lofoten Rorbuer","country":"Norge","description":"Tradisjonelle rorbuer med utsikt over fjorden.","pricePerNight":1850.0,"available":true}, …]
+```
+
+Alternativet — en håndformatert tabell/punktliste i en `String` — ble valgt bort:
+
+- **`id` overlever.** T-05/T-06/T-07 tar alle `destinationId`. I JSON er id-en et felt modellen
+  kan lese av og sende videre; i en pen tekstlinje («Lofoten Rorbuer, Norge — 1850 kr/natt»)
+  må den enten utelates eller pakkes inn i prosa som modellen må parse tilbake.
+- **Feltnavn er selvdokumenterende.** `"pricePerNight":1850.0` er entydig; «1850» i en
+  kolonne krever at modellen husker kolonneoverskriften. Det gjør også formatet robust for
+  klienter som ikke er en LLM (Inspector viser det som JSON).
+- **Ingen kode å vedlikeholde.** Formateringskode er et sted der domenet og presentasjonen kan
+  gli fra hverandre. Her finnes ingen mapping — legges det til et felt i `Destination`, er det
+  med i svaret.
+
+En egen DTO (f.eks. `DestinationSummary` uten `description`/`available`) ble også vurdert og
+valgt bort: `description` er nettopp det som lar modellen svare på «hvor er det fint å gå på
+ski?», og `available` er billig og ærlig (feltet er alltid `true` her, siden `listAvailable()`
+filtrerer). En DTO ville duplisert domenet uten å gi modellen noe.
+
+> **Knapp for senere:** `@McpTool(generateOutputSchema = true)` gjør at Spring AI også legger
+> ved `outputSchema` og fyller `structuredContent` i stedet for tekstblokken. Ikke slått på her
+> — fasiten holder seg til tekst-JSON, som er det alle klienter forstår.
+
+#### `annotations`: tool-hint som er verdt å sette
+
+T-00-tracen viste at `about_application` arver Spring AI sine defaults —
+`readOnlyHint:false, destructiveHint:true` — altså at eksempel-verktøyet *ser ut som* det kan
+ødelegge noe. Her settes hintene eksplisitt (`readOnlyHint = true`, `destructiveHint = false`,
+`idempotentHint = true`, `openWorldHint = false`), så en host som har «spør før destruktive
+kall» skrudd på kan kjøre dette uten å plage brukeren.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 20 tester (18 fra før + 2 nye i `DestinationToolsTest`).
+Testen kaller beanen direkte, siden MCP-serveren er avskrudd i test
+(`spring.ai.mcp.server.enabled=false`); den sjekker at alle 5 seedede reisemål kommer i
+id-rekkefølge (repository-et har `ORDER BY id`) og at navn/land/pris stemmer for Lofoten.
+
+**2. Gjennom protokollen** — samme håndtrykk som i T-00, men med `tools/call`:
+
+```bash
+… initialize ; notifications/initialized ; tools/list ;
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_destinations","arguments":{}}}
+```
+
+Stdout ga nøyaktig tre linjer. `tools/list` inneholder nå **to** verktøy, og oppføringen for
+det nye er:
+
+```jsonc
+"inputSchema": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[]},
+"title": "Tilgjengelige reisemål",
+"annotations": {"title":"Tilgjengelige reisemål","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+```
+
+`inputSchema` er altså **tomt** — `properties: {}` og `required: []` — akkurat som
+`about_application`, og av samme grunn: metoden er parameterløs (se svar 2 i T-00). Det er
+først i T-04 at skjemaet får innhold.
+
+`tools/call` ga `"isError":false` og en tekstblokk med JSON-arrayet over — **5 reisemål**
+(Lofoten 1850, Santorini 2400, Kyoto 1600, Toscana 1400, Tromsø 2100), som er akseptkriteriet.
+Stderr bekreftet registreringen: `Tilgjengelige MCP-tools (2): [about_application, list_destinations]`.
+
+> Husk `./gradlew bootJar` før røyktesten — jar-en er et øyeblikksbilde, og et nytt `@McpTool`
+> dukker ikke opp i `tools/list` før den er bygget på nytt (samme fallgruve som i T-01/T-02).
