@@ -26,7 +26,7 @@ etterpå. Én commit per oppgave.
 | T-13 | Destinasjoner som Resource | ✅ | Ny pakke `resources/` → `resources/DestinationResources.java` med **to** `@McpResource`: den statiske `destination://catalog` (havner i `resources/list`) og malen `destination://{id}` (havner i `resources/templates/list`). Første primitiv som ikke er et verktøy: innholdet er **`text/markdown`**, ikke JSON, fordi det legges rått i konteksten; felles ressurs-beslutninger etablert for T-14; test `resources/DestinationResourcesTest.java` med 7 tester ([se under](#t-13--destinasjoner-som-resource)) |
 | T-14 | Bookinger som Resource | ✅ | `resources/BookingResources.java` med **én** `@McpResource`: malen `booking://{id}` (`resources/templates/list`). **Bevisst ingen liste-ressurs** — bookinger er transaksjonsdata som endres midt i samtalen, og en foreldet liste rått i konteksten er verre enn ingen; `list_bookings` dekker behovet. Innholdet slår opp reisemålsnavnet og gjengir lovlige statusoverganger fra `BookingStatus.canTransitionTo`; `booking://1` gir nå innhold i stedet for SDK-ens `-32002`; test `resources/BookingResourcesTest.java` med 10 tester ([se under](#t-14--bookinger-som-resource)) |
 | T-15 | Prompts | ✅ | Ny pakke `prompts/` → `prompts/VacationPrompts.java` med **to** `@McpPrompt`: `plan_vacation_within_budget` (en **arbeidsflyt uttrykt som tekst** — fem argumenter, to obligatoriske, som skriver ut rekkefølgen T-03→T-07 skal kalles i) og `travel_summary` (instruksjon + bookingen **vedlagt** som `EmbeddedResource` med innhold gjenbrukt fra `booking://{id}`). Tredje og siste primitiv: **brukerstyrt** (menyvalg/slash-kommando), mot modellstyrte verktøy og applikasjonsstyrte ressurser. Empirisk verifisert at prompt-argumenter er en flat liste uten `inputSchema` (`@McpArg`, ikke `@McpToolParam`), at `required` **ikke håndheves av noen**, og at en `String`-returverdi gir rollen `assistant`; test `prompts/VacationPromptsTest.java` med 14 tester ([se under](#t-15--prompts)) |
-| T-16 | `bookings_report` | ⬜ | — |
+| T-16 | `bookings_report` | ✅ | Ny verktøyklasse `tools/ReportTools.java` → `bookings_report` (tre valgfrie parametere), og — **den ene oppgaven med ny kode i tjenestelaget** — `service/ReportingService.java` + `service/BookingsReport.java`. Aggregeringen ble lagt i Java over eksisterende repository-metoder, ikke i ny SQL; **ingen** repository-metode er endret eller lagt til. Definisjonene: **omsetning** = `totalPrice` for alt unntatt `CANCELLED` (`PENDING` er med, men skilles ut i `pendingRevenue`; kansellert rapporteres for seg), **belegg** = plassdøgn `bookedNights / capacityNights` per `availability`-rad, med T-11s kapasitetskartlegging som premiss. Test `tools/ReportToolsTest.java` med 14 tester ([se under](#t-16--bookings_report)). **Epic 6 ferdig.** |
 | T-17 | Streamable HTTP-transport | ⬜ | — |
 | T-18 | Bearer-token-auth | ⬜ | — |
 | T-19 | Koble Claude til remote-serveren | ⬜ | — |
@@ -38,6 +38,10 @@ etterpå. Én commit per oppgave.
 - **stdio er fortsatt default.** T-17/T-18 legges bak Spring-profilen `http`, slik at
   `java -jar …` uten profil fortsatt er en stdio-server og T-01/T-02/README holder seg gyldige.
 - **Verktøykode skal delegere** til `service/`-laget — ingen ny forretnings- eller SQL-kode.
+  **Ett unntak, T-16:** ingen eksisterende tjeneste aggregerer, så rapporten fikk en ny
+  `ReportingService`. Unntaket gjelder *tjenestelaget*, ikke fasade-regelen: `ReportTools` er
+  like tynn som de andre verktøyklassene, og ingen repository-metode ble endret eller lagt til.
+  Se [T-16-seksjonen](#t-16--bookings_report) for hvorfor aggregeringen ble Java og ikke SQL.
 - **Feilhåndtering (avgjort i T-04 — følg denne):** `ValidationException`/`NotFoundException`
   fra tjenestelaget **får boble ut av verktøymetoden**. Ingen `try/catch` i `tools/`-laget.
   Spring AI fanger exception-en i `SyncMcpToolMethodCallback.apply(...)` og returnerer et
@@ -52,9 +56,11 @@ etterpå. Én commit per oppgave.
   med suffikset `Tools`. Planlagt fordeling:
   `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
   `BookingTools` (T-07 ✅, T-08 ✅, T-09 ✅, T-10 ✅, T-11 ✅ — ingen nytt verktøy, bare
-  `description`, T-12 ✅). Fordelingen holdt hele veien: `BookingTools` fikk fem verktøy og
-  beholdt sin ene konstruktør-avhengighet. `AboutTool` (entall) står igjen som
-  eksempel-klassen fra skallet.
+  `description`, T-12 ✅) · `ReportTools` (T-16 ✅). Fordelingen holdt hele veien: `BookingTools`
+  fikk fem verktøy og beholdt sin ene konstruktør-avhengighet. `AboutTool` (entall) står igjen som
+  eksempel-klassen fra skallet. `ReportTools` er unntaket som bekrefter regelen: en rapport har
+  ikke ett domeneområde, den leser reisemål, tilgjengelighet *og* bookinger, og fikk derfor sin
+  egen klasse — samme resonnement som gjorde `VacationPrompts` til én klasse på tvers i T-15.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
 - **Metodenavnet er camelCase av verktøynavnet** (`list_destinations` → `listDestinations`),
@@ -2653,3 +2659,275 @@ alle Spring-beans, så en `@Component` er alt som skal til.
 | «Invalid prompt name» | Navnet i `prompts/get` matcher ingen `@McpPrompt(name = …)` | Sjekk `prompts/list`; SDK-en svarer før noen metode kalles |
 | Prompten dukker ikke opp i hosten | Jar-en er et øyeblikksbilde | `./gradlew bootJar` og koble til på nytt — samme fallgruve som for verktøy og ressurser |
 | Hosten viser ingen prompts i det hele tatt | Ikke alle hoster eksponerer prompts i UI-et | Test med Inspector eller stdio-røyktesten; `/mcp`-menyen i Claude Code viser dem som kommandoer |
+
+### T-16 · `bookings_report`
+
+**Den mest åpne oppgaven i backloggen** — måldefinisjonen er én setning («oppsummer omsetning og
+belegg pr. reisemål/periode»), og det er nettopp definisjonene som er jobben. Et rapporttall uten
+en definert teller og nevner er verdiløst for en LLM som skal forklare det videre for et menneske,
+så begge tallene er definert presist, både i `description` (der modellen ser dem) og her.
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/tools/ReportTools.java` | Ny verktøyklasse med `@McpTool(name = "bookings_report")` — tre valgfrie parametere, ren fasade |
+| `src/main/java/no/computas/vacationmcp/service/ReportingService.java` | **Ny tjeneste** — definisjonene og hele aggregeringen |
+| `src/main/java/no/computas/vacationmcp/service/BookingsReport.java` | Svar-recorden med de nøstede `Totals`, `DestinationLine` og `PeriodLine` |
+| `src/test/java/no/computas/vacationmcp/tools/ReportToolsTest.java` | 14 tester regnet ut for hånd mot `data.sql` |
+
+#### Definisjonen av «omsetning»
+
+> `revenue` = summen av `totalPrice` for **alle bookinger unntatt `CANCELLED`**.
+
+Spørsmålet oppgaven stiller er hva som skjer med `PENDING`. Svaret er at den **teller med** — men
+skilles ut:
+
+- **`CANCELLED` er ute.** Ingen inntekt, og ingen plasser holdt. Å ta den med ville gjort rapporten
+  ubrukelig etter noen avbestillinger.
+- **`PENDING` er inne.** Statusen er ikke et forbehold om at bookingen kanskje ikke finnes: plassene
+  er allerede beslaglagt for alle andre, og et reisemål som er utsolgt av ubekreftede bookinger er
+  ikke ledig. Dette er også **nøyaktig samme sett som holder på kapasiteten i T-11**
+  (`status <> 'CANCELLED'`), og det er den avgjørende grunnen: omsetning og belegg må telle de samme
+  bookingene, ellers kan ikke de to tallene i samme rapport sammenlignes.
+- **Men usikkerheten er ikke skjult.** `pendingRevenue` er den delen av `revenue` som står i
+  `PENDING` — en **delmengde**, ikke et tillegg — så modellen kan si «40 400 kr, hvorav 30 800 ennå
+  ikke er bekreftet» uten et eneste ekstra verktøykall. `description` sier eksplisitt at de to ikke
+  skal legges sammen.
+- **Det avlyste rapporteres for seg** i `cancelledBookings`/`cancelledRevenue`, utenfor `revenue`,
+  slik at «hvor mye mistet vi på avbestillinger?» kan besvares fra samme svar.
+
+Alternativene ble vurdert og valgt bort: *bare `PAID`+`COMPLETED`* (kontantprinsippet) gir et tall
+som er null i et datasett der ingen har betalt ennå, og som ikke lar seg sammenligne med belegget;
+*alle statuser inkludert `CANCELLED`* er ikke omsetning i noen forstand. En fjerde bøtte
+(`paidRevenue`) ble droppet — `list_bookings(PAID)` finnes allerede, og fire pengetall i samme
+konvolutt inviterer til feiladdering.
+
+#### Definisjonen av «belegg»
+
+> `occupancyRate` = `bookedNights / capacityNights`, målt i **plassdøgn** per `availability`-rad.
+> `capacityNights` = periodens `capacity` × antall netter i perioden.
+> `bookedNights` = Σ `numTravelers × overlappende netter` for de samme bookingene som teller i
+> omsetningen.
+
+Dette er valget som krevde mest av T-11-kartleggingen. Den nærliggende definisjonen — *reisende
+delt på `capacity`* — er **feil**, og feilen er ikke subtil:
+
+- **`capacity` er antall samtidige plasser, ikke en kvote for hele perioden.** T-11 slo fast at
+  kapasitetssjekken trekker fra bookinger som *overlapper datoene*, ikke alle bookinger i perioden.
+  Kyoto har `capacity: 3` i en periode på 60 netter og kan derfor ta imot langt flere enn 3 reisende
+  i løpet av høsten. «Reisende / capacity» ville gitt 400 % belegg på et halvtomt reisemål.
+- **Plassdøgn har en nevner som faktisk er en øvre grense.** T-11 punkt 4: regelen er konservativ og
+  slipper aldri gjennom en enkeltdag med flere reisende enn `capacity`. Da er
+  `bookedNights ≤ capacityNights` garantert, og tallet ligger mellom 0 og 1. Testen
+  `occupancyReachesOneHundredPercentWhenEverySeatIsTaken` pinner grensen: 3 reisende × 3 netter av
+  3 plasser × 3 netter = 1.0.
+- **Teller og nevner leveres ved siden av raten.** `occupancyRate: 0.0333` alene inviterer til
+  gjetting; med `bookedNights: 6` og `capacityNights: 180` kan modellen gjengi regnestykket.
+- **`occupancyRate: null` når `capacityNights` er 0.** Da finnes det ingen åpen periode å måle mot,
+  og «0 %» ville løyet om at det sto ledige plasser ingen tok. Se Kyoto og Tromsø i juli-rapporten
+  under — begge er stengt da.
+- **Belegget aggregeres på plassdøgnene, ikke som et snitt av ratene.** Et lite, tomt reisemål skal
+  ikke telle like mye som et stort fullt.
+
+#### Hvor aggregeringen ble lagt, og hvorfor
+
+**Java i en ny `ReportingService`** — ikke en aggregerende spørring i `repository/`-laget, og ikke i
+verktøyklassen.
+
+*Hvorfor tjenestelaget og ikke verktøyet:* definisjonene over **er** forretningsregler. De svarer på
+hvilke statuser som er inntekt og hva nevneren i et beleggstall er, og hører hjemme ved siden av
+`BookingService`/`PricingService`. `ReportTools` er like tynn som de andre verktøyklassene: én
+delegering, ingen utregning, ingen `try/catch`.
+
+*Hvorfor Java og ikke SQL:*
+
+1. **Ingen ny SQL, og ingen endret repository-metode.** Rapporten er bygget utelukkende av
+   `DestinationRepository.findAllAvailable()`/`findById(...)`,
+   `AvailabilityRepository.findByDestinationId(...)` og `BookingRepository.findAll()` — alle tre
+   fantes fra før. En rapport skal ikke kunne ødelegge for booking-flyten.
+2. **Plassdøgn er datoaritmetikk, ikke gruppering.** Hver booking må klippes mot *både* perioden og
+   et eventuelt datofilter før nettene telles. I SQLite blir det
+   `julianday(max(...)) - julianday(min(...))` inne i en korrelert join mellom `bookings` og
+   `availability`, på ISO-tekstdatoer — vanskeligere å lese, vanskeligere å teste, lettere å ta feil
+   av enn ti linjer `ChronoUnit.DAYS`.
+3. **Datamengden gjør det til et ikke-tema.** Fem reisemål, seks perioder, bookinger i
+   titallsklassen. En aggregerende spørring hadde vært optimalisering uten et problem. (På et
+   datasett der `findAll()` ikke er forsvarlig, ville konklusjonen vært motsatt — det er verdt å si
+   høyt, for valget er avhengig av skalaen, ikke prinsipielt.)
+4. **Definisjonene blir testbare.** Reglene står som Java `ReportToolsTest` kan pinne ned booking for
+   booking, i stedet for inne i en SQL-streng.
+
+**Prisen** er at overlapp-predikatet nå finnes to steder: `ReportingService.overlaps(...)` og
+`WHERE`-klausulen i `BookingRepository.sumActiveTravelers`. De er bevisst holdt ordrett like —
+halvåpent `start < to AND end > from`, alt unntatt `CANCELLED` — og det står i javadoc-en begge veier.
+
+#### Filtrene, og den ene asymmetrien man må kjenne til
+
+Tre valgfrie parametere (`destinationId`, `from`, `to`), etter T-04-mønsteret: `required = false` på
+alle tre og bokset `Long`, så `required` blir stående **tomt** i skjemaet og `null` overlever fram til
+tjenesten. Datoene er `LocalDate` etter T-05 og blir `{"type":"string","format":"date"}`.
+
+```jsonc
+"destinationId": {"type":"integer","format":"int64","description":"Valgfritt filter: …"},
+"from": {"type":"string","format":"date","description":"…"},
+"to":   {"type":"string","format":"date","description":"…"},
+"required": []
+```
+
+**`from`/`to` virker ulikt på de to tallene, og det er tilsiktet:**
+
+- **Omsetning fordeles ikke på netter.** En booking som overlapper vinduet teller med **hele**
+  `totalPrice`. Beløpet ble fakturert én gang; å dele det på netter ville funnet opp et tall som
+  ikke finnes i noen rad.
+- **Belegg klippes i begge ender.** Bare netter inne i vinduet telles, mot kapasiteten i den delen av
+  perioden som ligger inne i vinduet. En rate over tid *må* klippes, ellers sammenligner man en
+  avkortet teller med en full nevner.
+
+Konsekvensen står i `description`: et smalt vindu rundt et opphold gir full omsetning, men bare de
+nettene som er inni. `revenueIsNotProratedWhenOnlyPartOfTheStayIsInsideTheWindow` pinner det fast.
+
+Ellers: `from` inklusiv, `to` **eksklusiv** (som en utsjekksdag) — samme halvåpne regning som resten
+av serveren. `from` etter `to` gir `ValidationException("fra-dato må være før til-dato")`, ordrett
+samme melding som `PricingService` og `check_availability`. En ukjent `destinationId` gir
+`NotFoundException`, ikke en tom rapport: en rapport full av nuller for et reisemål som ikke finnes
+er verre enn en feilmelding. Reisemål **uten** bookinger står derimot igjen med nuller — «Toscana
+står tomt» er et svar, en manglende linje er det ikke.
+
+#### Svarformen
+
+En konvolutt som gjentar filtrene (`from`, `to`, `destinationId` — `null` = ikke filtrert),
+`totals` for hele utvalget, og én `perDestination`-linje per reisemål med **de samme feltnavnene**
+og én `PeriodLine` per tilgjengelighetsperiode. At `Totals` gjenbrukes på begge nivåer er poenget:
+et felt betyr det samme uansett hvor modellen leser det.
+
+Linjene er **sortert på omsetning, høyest først** (deretter id, så rekkefølgen er deterministisk),
+slik at «hvilket reisemål tjener vi mest på?» besvares av den første linja. Det er det ene stedet
+rapporten avviker fra `ORDER BY id`-konvensjonen i de andre verktøyene, og det er bevisst: en
+rapport leses ovenfra.
+
+#### Gjennom protokollen — det faktiske svaret
+
+Røyktest mot `build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar` (håndtrykk som i T-00, deretter
+11 `tools/call`): tom rapport → tre `create_booking` → `update_booking_status` `CONFIRMED` på den
+første → `cancel_booking` på den andre → tre rapporter → to feiltilfeller.
+
+| # | Kall | Resultat |
+|---|------|----------|
+| 1 | `bookings_report {}` uten bookinger | `revenue: 0`, `capacityNights: 3082`, alle 5 reisemål med nuller |
+| 2–4 | `create_booking` Kyoto 10-05→10-08 **2**, Kyoto 10-20→10-22 **1**, Lofoten 07-01→07-08 **2** | id 1–3; 9600, 3200 og 30800 kr |
+| 5 | `update_booking_status {"id":1,"status":"CONFIRMED"}` | Kyoto-bookingen er ikke lenger `PENDING` |
+| 6 | `cancel_booking {"id":2}` | 3200 kr ut av omsetningen |
+| 7 | `bookings_report {}` | `revenue: 40400`, `pendingRevenue: 30800`, `cancelledRevenue: 3200` |
+| 8 | `bookings_report {"destinationId":3}` | bare Kyoto-linja; `totals` == linja |
+| 9 | `bookings_report {"from":"2026-07-01","to":"2026-07-08"}` | Lofoten 33,33 % belegg; Kyoto/Tromsø `occupancyRate: null` |
+| 10 | `bookings_report {"destinationId":999}` | `isError: true` — `Fant ingen destinasjon med id 999` |
+| 11 | `bookings_report {"from":"2026-10-08","to":"2026-10-05"}` | `isError: true` — `fra-dato må være før til-dato` |
+
+Hele svaret på kall 8 (`{"destinationId":3}`), ordrett fra tekstblokken:
+
+```json
+{
+  "from": null,
+  "to": null,
+  "destinationId": 3,
+  "destinations": 1,
+  "totals": {
+    "bookings": 1,
+    "travelers": 2,
+    "revenue": 9600.0,
+    "pendingRevenue": 0.0,
+    "cancelledBookings": 1,
+    "cancelledRevenue": 3200.0,
+    "capacityNights": 180,
+    "bookedNights": 6,
+    "occupancyRate": 0.0333
+  },
+  "perDestination": [
+    {
+      "destinationId": 3,
+      "name": "Kyoto Machiya",
+      "country": "Japan",
+      "totals": {
+        "bookings": 1, "travelers": 2, "revenue": 9600.0, "pendingRevenue": 0.0,
+        "cancelledBookings": 1, "cancelledRevenue": 3200.0,
+        "capacityNights": 180, "bookedNights": 6, "occupancyRate": 0.0333
+      },
+      "periods": [
+        {
+          "availabilityId": 4,
+          "startDate": "2026-10-01",
+          "endDate": "2026-11-30",
+          "capacity": 3,
+          "nights": 60,
+          "capacityNights": 180,
+          "bookedNights": 6,
+          "occupancyRate": 0.0333,
+          "bookings": 1,
+          "revenue": 9600.0
+        }
+      ]
+    }
+  ]
+}
+```
+
+Hvert eneste tall lar seg etterregne mot `data.sql`: 1600 kr/natt × 3 netter × 2 reisende = 9600;
+2 reisende × 3 netter = 6 plassdøgn av 3 plasser × 60 netter = 180 → 0,0333; den kansellerte
+bookingen ligger i `cancelledRevenue` og **ingen** andre steder. `pendingRevenue: 0` fordi kall 5
+bekreftet bookingen — beløpet står fortsatt i `revenue`.
+
+`totals`-blokken fra kall 7 (alle reisemål) og de to interessante linjene fra kall 9:
+
+```jsonc
+// 7) hele bildet: 30800 (Lofoten, PENDING) + 9600 (Kyoto, CONFIRMED)
+"totals": {"bookings":2,"travelers":4,"revenue":40400.0,"pendingRevenue":30800.0,
+           "cancelledBookings":1,"cancelledRevenue":3200.0,
+           "capacityNights":3082,"bookedNights":20,"occupancyRate":0.0065}
+
+// 9) vindu 2026-07-01 → 2026-07-08: perioden klippes til 7 netter
+"periods": [{"availabilityId":1,"startDate":"2026-07-01","endDate":"2026-07-08","capacity":6,
+             "nights":7,"capacityNights":42,"bookedNights":14,"occupancyRate":0.3333,
+             "bookings":1,"revenue":30800.0}]
+
+// 9) Kyoto er stengt i juli — ingen nevner, altså ikke 0 %
+{"destinationId":3,"name":"Kyoto Machiya","country":"Japan",
+ "totals":{…,"capacityNights":0,"bookedNights":0,"occupancyRate":null},"periods":[]}
+```
+
+**Én observasjon verdt å ta med videre:** totalbelegget uten datofilter er `0.0065`, altså 0,65 %.
+Tallet er *riktig* — nevneren er hver eneste åpne natt for alle fem reisemålene i et halvt år — men
+det er sjelden det brukeren spør om. Med et vindu på én uke blir det samme tallet 11,11 %, og per
+periode 33,33 %. Derfor peker `description` modellen mot `from`/`to` når spørsmålet gjelder «hvor
+fullt er det», og derfor står `capacityNights` alltid ved siden av raten: uten nevneren er et lavt
+beleggstall lett å feiltolke som en dårlig sesong.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 135 tester (121 fra før + 14 nye i `ReportToolsTest`). De nye
+dekker: tom database (alle fem reisemål med nuller, og `capacityNights: 3082` — summen av kapasitet
+× netter for alle seks periodene i `data.sql`); at periodelinja beskriver `availability`-raden den
+kom fra; at `PENDING` teller i `revenue` *og* i `pendingRevenue`; at `CONFIRMED` blir stående i
+`revenue` men forlater `pendingRevenue` og fortsatt holder på plassene; at `CANCELLED` er ute av
+både omsetning og belegg, men synlig i `cancelledRevenue`; summering og sortering på tvers av
+reisemål (Lofoten 30800 foran Kyoto 12800, resten på id); at `destinationId` gir én linje der
+`totals` er identisk med linja; ukjent id og `from` etter `to` som feil; at datovinduet klipper
+begge sider av beleggsbrøken; at omsetningen *ikke* klippes; at bookinger utenfor vinduet faller ut
+mens nevneren står igjen; `occupancyRate: null` uten periode i vinduet; og 100 % belegg som øvre
+grense.
+
+**2. Gjennom protokollen** — tabellen over. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (11): [about_application, check_availability, create_booking, get_booking, list_bookings, cancel_booking, update_booking_status, list_destinations, search_destinations, get_quote, bookings_report]`.
+
+> **Røyktesten skriver til `vacation.db`** (tre bookinger + to statusendringer). Fila ble kopiert før
+> kjøringen og lagt tilbake etterpå — `select count(*) from bookings` er 0 igjen. Hjelpeskriptet lå i
+> en scratchpad-katalog utenfor repoet.
+
+#### Fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| Belegget blir over 100 % | Målt som «reisende / capacity» | `capacity` er samtidige plasser, ikke en periodekvote — mål i plassdøgn |
+| Belegget virker absurd lavt | Ingen datofilter: nevneren er hele sesongen | Sett `from`/`to`, eller les periodelinjene i stedet for `totals` |
+| `occupancyRate` er `null` | Ingen `availability`-rad overlapper vinduet | Det er svaret: reisemålet er stengt i perioden — ikke tolk det som 0 % |
+| Omsetningen «forsvinner» etter en kansellering | `CANCELLED` er ute av `revenue` etter definisjonen | Tallet står i `cancelledRevenue` |
+| Omsetning + kansellert gir feil sum | `cancelledRevenue` ligger *utenfor* `revenue` | Ikke legg dem sammen; `pendingRevenue` er derimot en delmengde av `revenue` |
+| Sum av `periods[].revenue` < reisemålets `revenue` | En booking dekkes ikke av noen enkelt `availability`-rad (kan bare skje ved skriving utenom `create_booking`) | Reisemålslinja er fasiten; periodelinjene fordeler det som lar seg fordele |
