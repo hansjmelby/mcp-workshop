@@ -148,7 +148,9 @@ Fjern den igjen med `claude mcp remove vacation-booking -s local`.
 
 #### Claude Desktop
 
-Legg dette inn i host-konfigurasjonen:
+Åpne konfigurasjonsfila via **Settings → Developer → Edit Config**. Den ligger i
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) eller
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows). Legg inn:
 
 ```json
 {
@@ -166,15 +168,22 @@ Legg dette inn i host-konfigurasjonen:
 > (Forward slashes fungerer også: `"C:/Users/deg/mcp-workshop/build/libs/…"`.)
 > `add-json`-kommandoen over er bash — kjør den i **Git Bash** eller **WSL**.
 
+Stien **må være absolutt**. Claude Desktop starter jar-en fra sin egen arbeidskatalog, ikke
+fra prosjektroten, så `build/libs/…` gir «server disconnected» uten noen tydelig forklaring.
+
 Spør deretter Claude: «hva er denne applikasjonen?» — den skal bruke verktøyet.
 
-#### To ting som ofte forvirrer
+#### Tre ting som ofte forvirrer
 
 - **Serveren kobles opp ved oppstart.** Legger du den til mens Claude Code / Claude Desktop
   kjører, dukker ikke verktøyene opp før du starter på nytt. (`/mcp` viser status.)
 - **Jar-en er et øyeblikksbilde.** Nye `@McpTool`-er blir ikke synlige før du har kjørt
   `./gradlew bootJar` på nytt *og* restartet hosten. Dette er den vanligste grunnen til at
   «verktøyet mitt vises ikke».
+- **`./gradlew clean` sletter jar-en under føttene på en kjørende host.** Hosten holder
+  serverprosessen i live fra den startet den, så et `clean build` river bort fila den peker på
+  og tilkoblingen faller ut. Bygg ferdig først, og koble så til igjen: `/mcp` i Claude Code,
+  eller restart av Claude Desktop.
 
 ---
 

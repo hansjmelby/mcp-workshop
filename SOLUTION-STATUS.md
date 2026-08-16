@@ -12,7 +12,7 @@ etterpå. Én commit per oppgave.
 |---------|-----|--------|-----------|
 | T-00 | MCP-protokollen under panseret | 📝 | Verifisert trace + capability-analyse + svar ([se under](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner)) |
 | T-01 | Bygg, kjør og inspiser skallet | 📝 | Grønn `clean build` + jar; `about_application` verifisert via stdio og Inspector-CLI; web-UI-et dokumentert ([se under](#t-01--bygg-kjør-og-inspiser-skallet)) |
-| T-02 | Koble serveren til Claude | ⬜ | — |
+| T-02 | Koble serveren til Claude | 📝 | Registrert som stdio-server i Claude Code (`✔ Connected`) og `about_application` kalt gjennom hosten; README-oppskriften verifisert + presisert ([se under](#t-02--koble-serveren-til-claude)) |
 | T-03 | `list_destinations` | ⬜ | — |
 | T-04 | `search_destinations` | ⬜ | — |
 | T-05 | `check_availability` | ⬜ | — |
@@ -330,3 +330,88 @@ med eldre Node må enten oppgradere eller kjøre `npx @modelcontextprotocol/insp
 | Nytt verktøy dukker ikke opp | Jar-en er et øyeblikksbilde | Bygg på nytt (`./gradlew bootJar`) og **Reconnect** i Inspector |
 | Uforståelig JSON-parsefeil i Inspector | Noe har skrevet til `System.out` | All logging skal gå gjennom loggeren; stdout tilhører JSON-RPC |
 | `npx` finner ikke pakken / krasjer ved oppstart | For gammel Node | Inspector v2 krever Node ≥ 22.19.0 |
+
+### T-02 · Koble serveren til Claude
+
+Ingen kodeendring — dette er en oppsett-/verifikasjonsoppgave. Hosten som ble brukt er
+**Claude Code**; Claude Desktop er ikke installert på maskinen, så den delen er verifisert som
+dokumentasjon (JSON-syntaks og sti-krav), ikke klikket gjennom.
+
+#### 1. Serveren er registrert og tilkoblet
+
+Oppskriften i README ble fulgt som den står — `add-json` fra prosjektroten, med `$(pwd)` som
+fyller inn absolutt sti:
+
+```bash
+claude mcp add-json vacation-booking \
+  "{\"command\":\"java\",\"args\":[\"-jar\",\"$(pwd)/build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar\"]}"
+```
+
+Les-verifikasjon etterpå:
+
+```
+$ claude mcp list
+vacation-booking: java -jar /Users/hjm/dev/mcp-workshop/build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar - ✔ Connected
+
+$ claude mcp get vacation-booking
+vacation-booking:
+  Scope: Local config (private to you in this project)
+  Status: ✔ Connected
+```
+
+Det registrerte oppsettet (i `~/.claude.json`, under `projects` → prosjektstien) er nøyaktig
+`{"command":"java","args":["-jar","<absolutt sti>/…-SNAPSHOT.jar"]}`, og jar-en på den stien
+finnes (~35 MB fat-jar fra `bootJar`). README-teksten «skal vise `Status: ✔ Connected`» stemmer
+altså ordrett med det CLI-en skriver.
+
+#### 2. Akseptkriteriet: Claude lister og kaller verktøyet
+
+`about_application` er tilgjengelig for hosten og ble kalt gjennom den — svaret var about-teksten
+fra `AboutTool` («Dette er en ferie-booking MCP-server bygget i Spring Boot med Spring AI …»),
+ikke en modell-gjetning. **Slik tester deltakeren:** spør hosten *«hva er denne applikasjonen?»*.
+Riktig oppførsel er at Claude ber om å få kalle `vacation-booking · about_application` (verktøyet
+tar ingen argumenter, så kallet er `arguments: {}`) og svarer på grunnlag av returverdien.
+`/mcp` i Claude Code viser samme ting fra listesiden: serveren som *connected* med ett verktøy.
+
+#### 3. Oppskriftene er kontrollert, ikke bare lest
+
+- **`add-json`-JSON-en** ble parset som JSON etter skall-ekspansjon — gyldig. Merk at
+  argumentet er *ett* JSON-objekt i doble hermetegn, så `$(pwd)` ekspanderes, mens de indre
+  hermetegnene må escapes (`\"`). Skriver du enkle hermetegn rundt i stedet, ekspanderes ikke
+  `$(pwd)` og du får en literal `$(pwd)` i stien.
+- **Claude Desktop-JSON-en** i README ble også parset — gyldig.
+- Serveren havner i **local scope** (privat for deg i dette prosjektet), som README lover.
+  `claude mcp remove vacation-booking -s local` fjerner den igjen.
+
+#### 4. To README-presiseringer (gjort her)
+
+1. **Hvor Claude Desktop-konfigurasjonen ligger** manglet. Lagt til: *Settings → Developer →
+   Edit Config*, `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) /
+   `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
+2. **Kravet om absolutt sti** er nå eksplisitt i Desktop-avsnittet: Desktop starter jar-en fra
+   *sin egen* arbeidskatalog, ikke prosjektroten, så en relativ `build/libs/…` gir «server
+   disconnected» uten tydelig forklaring. (For Claude Code sin `-s project`-variant er relativ
+   sti derimot riktig — den skal fungere på andres maskiner.)
+
+#### 5. Fallgruven som faktisk inntraff
+
+**`./gradlew clean` river jar-en bort under en kjørende host.** Hosten starter serverprosessen
+når *den* starter og holder den i live; den peker på en konkret fil. Under arbeidet med T-01 ble
+`./gradlew clean build` kjørt, og i vinduet der `build/libs/` var tomt mistet Claude Code
+tilkoblingen til `vacation-booking`. Dette er *ikke* en feil i konfigurasjonen — fiksen er å
+bygge ferdig og deretter koble til på nytt (`/mcp` i Claude Code, eller restart av Claude
+Desktop). Lagt inn som tredje kulepunkt i README-seksjonen «Tre ting som ofte forvirrer», ved
+siden av de to eksisterende (serveren kobles opp ved oppstart; jar-en er et øyeblikksbilde).
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| Serveren forsvinner midt i en økt | `./gradlew clean` slettet jar-en hosten kjører | Bygg på nytt, så `/mcp` → reconnect (Desktop: restart) |
+| `✘ Failed to connect` rett etter `add-json` | Jar-en er ikke bygget ennå | `./gradlew bootJar` først |
+| Nytt verktøy vises ikke i `/mcp` | Jar-en er et øyeblikksbilde | `./gradlew bootJar` + reconnect |
+| Claude Desktop: «server disconnected», ingen detaljer | Relativ sti, eller enkelt backslash på Windows | Absolutt sti, `\\` eller `/` i JSON |
+| Verktøyet finnes, men Claude bruker det ikke | Spørsmålet traff ikke beskrivelsen | Spør konkret: «hva er denne applikasjonen?» — eller be eksplisitt om verktøyet |
+
+Loggen for host-startede servere: Claude Desktop skriver serverens stderr til
+`~/Library/Logs/Claude/mcp-server-vacation-booking.log`. Uansett host skriver serveren selv
+til `logs/vacation-booking-mcp.log` i prosjektroten — den er den mest praktiske under workshopen,
+siden den finnes uavhengig av hvem som startet prosessen.
