@@ -122,7 +122,8 @@ Inspector skriver ut en URL i terminalen med et **auth-token**
 ### Koble til Claude (stdio)
 
 Serveren registreres som en stdio-server med **absolutt sti** til jar-en. Bygg den først
-(`./gradlew bootJar`).
+(`./gradlew bootJar`). Skal du i stedet koble til den kjørende HTTP-serveren, se
+[Koble til Claude (HTTP)](#koble-til-claude-http) lenger ned.
 
 #### Claude Code (CLI)
 
@@ -305,6 +306,115 @@ slipper inn har ingen sesjon å feile innenfor.
 I HTTP-modus eier ikke protokollen stdout lenger — JSON-RPC går over HTTP-body-en. Derfor
 logger serveren til **stdout** i denne profilen (og fortsatt til
 `logs/vacation-booking-mcp.log`), i motsetning til stdio-modus der alt må til stderr.
+
+### Koble til Claude (HTTP)
+
+Samme server, men registrert som en **remote** server i stedet for en kommando. Den store
+forskjellen: **du starter serveren, ikke hosten.** Start den først (se over), og la den kjøre —
+registrerer du en adresse ingenting lytter på, får du `ConnectionRefused` med en gang.
+
+#### Claude Code (CLI)
+
+```bash
+claude mcp add --transport http vacation-booking-http http://localhost:8080/mcp \
+  --header "Authorization: Bearer hemmelig-token"
+```
+
+`--transport http` (kort: `-t http`) velger Streamable HTTP, og `--header` (kort: `-H`) sendes
+med på **hvert** kall — også `GET` (SSE-strømmen) og `DELETE`. Sjekk at den svarer:
+
+```bash
+claude mcp list                       # … (HTTP) - ✔ Connected
+claude mcp get vacation-booking-http  # viser Type, URL og headere
+```
+
+Samme registrering i JSON-form — nyttig hvis du allerede bruker `add-json` for stdio-varianten:
+
+```bash
+claude mcp add-json vacation-booking-http \
+  '{"type":"http","url":"http://localhost:8080/mcp","headers":{"Authorization":"Bearer hemmelig-token"}}'
+```
+
+> **Hold tokenet ute av git.** `${MILJØVARIABEL}` i header-verdien ekspanderes fra miljøet der
+> Claude Code startes, så dette virker — og er det du vil ha med `-s project`, siden `.mcp.json`
+> havner i repoet:
+>
+> ```bash
+> claude mcp add-json vacation-booking-http -s project \
+>   '{"type":"http","url":"http://localhost:8080/mcp","headers":{"Authorization":"Bearer ${WORKSHOP_HTTP_AUTH_TOKEN}"}}'
+> ```
+>
+> Da må hver deltaker ha `WORKSHOP_HTTP_AUTH_TOKEN` satt i skallet *før* `claude` startes.
+
+Fjern den igjen med `claude mcp remove vacation-booking-http -s local`.
+
+#### Claude Desktop
+
+Claude Desktop tar **ikke** remote-servere i `claude_desktop_config.json` — den fila er for
+kommandoer den selv skal starte (stdio). Remote-servere legges inn under **Settings →
+Connectors → Add custom connector**, der du oppgir en URL og deretter autentiserer deg slik
+serveren ber om — i praksis OAuth. Det finnes ikke noe felt for «send denne headeren», så det
+statiske tokenet fra T-18 passer ikke inn i den flyten.
+
+To veier videre:
+
+1. **Bruk stdio-oppskriften i Desktop** (den over), og HTTP-varianten i Claude Code. Det er det
+   enkleste under workshopen.
+2. **Legg en stdio→HTTP-bro imellom.** `mcp-remote` er en liten proxy Desktop *kan* starte som
+   en vanlig kommando, og den kan sende en fast header:
+
+   ```json
+   {
+     "mcpServers": {
+       "vacation-booking-http": {
+         "command": "npx",
+         "args": [
+           "-y", "mcp-remote",
+           "http://localhost:8080/mcp",
+           "--header", "Authorization: Bearer hemmelig-token"
+         ]
+       }
+     }
+   }
+   ```
+
+   Broen er verifisert mot denne serveren (fra Claude Code, som kan starte nøyaktig samme
+   kommando) — `✔ Connected`. Selve Desktop-oppsettet er *ikke* klikket gjennom her.
+
+#### Hva som er annerledes enn stdio
+
+| | stdio | HTTP |
+|---|---|---|
+| Hvem starter serveren | hosten, når *den* starter | **du** — den må kjøre før du registrerer den |
+| Adresse | sti til jar-en | `http://localhost:8080/mcp` |
+| Auth | ingen — prosessen arver dine rettigheter | `Authorization: Bearer …` på hvert kall |
+| Antall klienter | én prosess per host | én prosess, mange klienter samtidig |
+| Ved kodeendring | `bootJar` **+ restart av hosten** | `bootJar` + restart av **serveren**; hosten kobler seg opp igjen selv |
+| Sesjon | prosessens levetid | `Mcp-Session-Id`-header per tilkobling; hosten forhandler ny ved behov |
+| Når serveren er nede | hosten starter den på nytt | `✘ Failed to connect — ConnectionRefused` til du starter den igjen |
+
+**Reconnect:** hosten holder ikke på én evig sesjon. Hver helsesjekk (`claude mcp list`,
+`claude mcp get`) og hver nye Claude-økt kjører sitt eget `initialize` og får sin egen
+sesjons-id. Restarter du serveren, blir gamle sesjons-id-er ugyldige (`-32603 Session not
+found`), men **konfigurasjonen er uendret** — neste kall kobler seg opp på nytt av seg selv.
+Det er den store praktiske gevinsten mot stdio, der en ny jar krever at hele hosten restartes.
+
+#### Feilsøking
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| `ConnectionRefused: Unable to connect` | Serveren kjører ikke, eller ikke med `http`-profilen | Start den, og se etter `Tomcat started on port 8080` i loggen |
+| `Server rejected the configured Authorization header (HTTP 401)` | Feil token — typisk fordi serveren ble restartet uten `WORKSHOP_HTTP_AUTH_TOKEN` og genererte et nytt | Sett et fast token, eller oppdater registreringen |
+| `Dynamic Client Registration rejected (HTTP 401)` | Du glemte `--header`. Uten en Authorization-header tolker hosten `401`-et vårt som en OAuth-utfordring og prøver seg på `/.well-known/…` og `POST /register` | Legg på `--header "Authorization: Bearer …"` — da slås OAuth-fallbacken av |
+| Verktøyene mangler i en åpen Claude-økt | Serveren ble registrert etter at økten startet | Start økten på nytt (`/mcp` viser status) |
+| Serveren vil ikke stoppe med Ctrl+C | En host holder SSE-strømmen (`GET /mcp`) åpen, så Spring sin graceful shutdown venter | Porten frigis med én gang uansett; trykk en gang til, eller `kill -9` |
+
+> **Bare for localhost.** Skal andre nå serveren, må du binde til noe annet enn loopback
+> (`--server.address=0.0.0.0`), åpne porten i brannmuren — og helst legge en TLS-terminerende
+> proxy foran, slik at URL-en blir `https://…`. Et statisk token over **ren HTTP** sendes i
+> klartekst og kan leses og gjenbrukes av hvem som helst på veien; det holder på en
+> workshop-maskin og ingen andre steder. Utenfor workshopen er svaret MCP-spesifikasjonens
+> OAuth 2.1-modell, ikke en delt hemmelighet.
 
 ---
 

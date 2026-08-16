@@ -29,7 +29,7 @@ etterpå. Én commit per oppgave.
 | T-16 | `bookings_report` | ✅ | Ny verktøyklasse `tools/ReportTools.java` → `bookings_report` (tre valgfrie parametere), og — **den ene oppgaven med ny kode i tjenestelaget** — `service/ReportingService.java` + `service/BookingsReport.java`. Aggregeringen ble lagt i Java over eksisterende repository-metoder, ikke i ny SQL; **ingen** repository-metode er endret eller lagt til. Definisjonene: **omsetning** = `totalPrice` for alt unntatt `CANCELLED` (`PENDING` er med, men skilles ut i `pendingRevenue`; kansellert rapporteres for seg), **belegg** = plassdøgn `bookedNights / capacityNights` per `availability`-rad, med T-11s kapasitetskartlegging som premiss. Test `tools/ReportToolsTest.java` med 14 tester ([se under](#t-16--bookings_report)). **Epic 6 ferdig.** |
 | T-17 | Streamable HTTP-transport | ✅ | **Ingen Java-kode** — kun bygg og konfigurasjon. `spring-ai-starter-mcp-server-webmvc` lagt til *ved siden av* stdio-starteren, og transporten slås om med Spring-profilen `http` (ny fil `src/main/resources/application-http.properties`). Uten profil: uendret stdio-server, ingen Tomcat (`spring.main.web-application-type=none`). Med profil: Streamable HTTP på `POST http://localhost:8080/mcp`. `logback-spring.xml` bytter konsoll-appenderen fra stderr til **stdout** i `http`-profilen, siden protokollen ikke eier stdout lenger. Begge transportene verifisert gjennom protokollen; alle 135 tester uendret grønne ([se under](#t-17--streamable-http-transport)) |
 | T-18 | Bearer-token-auth | ✅ | Én ny fil: `config/BearerTokenAuthFilter.java` — et `OncePerRequestFilter` med `@Profile("http")`, **ingen ny avhengighet** (Spring Security valgt bort, begrunnet under). Krever `Authorization: Bearer <token>` på alle forespørsler; avviser med `401` + `WWW-Authenticate` (ikke `403`, ikke stacktrace) før JSON-RPC i det hele tatt starter. Tokenet konfigureres med `workshop.http.auth.token` / `WORKSHOP_HTTP_AUTH_TOKEN`; står det tomt **genererer** serveren ett og logger det, så endepunktet aldri er åpent ved et uhell (tredje vei mellom «nekt å starte» og «kjør åpent med WARN»). stdio-modus er bit for bit uendret — filteret opprettes ikke uten profilen; alle 135 tester uendret grønne ([se under](#t-18--bearer-token-auth)) |
-| T-19 | Koble Claude til remote-serveren | ⬜ | — |
+| T-19 | Koble Claude til remote-serveren | ✅ | **Ingen kodeendring** — kun README. HTTP-varianten registrert i Claude Code og verifisert **ende-til-ende**: `claude mcp add --transport http vacation-booking-http http://localhost:8080/mcp --header "Authorization: Bearer …"` → `✔ Connected`, og `about_application` faktisk kalt gjennom hosten over HTTP med token. Syntaksen er lest ut av `claude mcp add --help` (v2.1.233), ikke gjengitt fra hukommelsen; JSON-formen `{"type":"http","url":…,"headers":{…}}` verifisert med `add-json`, og `${MILJØVARIABEL}`-ekspansjon i header-verdien bekreftet begge veier. Funnet som forklarer T-18-designet: **uten** `--header` tolker hosten vårt `401` som en OAuth-utfordring og prøver `/.well-known/*` + `POST /register` — filteret vårt stopper alt, og hosten gir opp med «Dynamic Client Registration rejected». Claude Desktop tar ikke remote-servere i `claude_desktop_config.json` (kun Connectors + OAuth, ingen header-felt) — dokumentert ærlig, med `mcp-remote`-broen som verifisert omvei. Brukerens stdio-registrering urørt, alle testregistreringer fjernet, ingen serverprosess igjen; 135 tester uendret grønne ([se under](#t-19--koble-claude-til-remote-serveren)). **Epic 7 ferdig.** |
 | T-20 | Elicitation (bonus) | ⬜ | — |
 | T-21 | Sampling (bonus) | ⬜ | — |
 
@@ -3395,3 +3395,256 @@ Det genererte tokenet ble verifisert i en egen kjøring uten `WORKSHOP_HTTP_AUTH
 | Tokenet virker i `curl`, men ikke fra hosten | Hosten sender ikke `Authorization` uten at den er konfigurert til det | Det er T-19 — hosten må få headeren i sin serverkonfigurasjon |
 | Auth «forsvant» | Serveren kjører uten `http`-profilen (stdio), eller med `workshop.http.auth.enabled=false` | Sjekk oppstartsloggen: `krever bearer-token` eller `UBESKYTTET` står der |
 | Tokenet havnet i git | Skrevet inn i `application-http.properties` | Bruk `WORKSHOP_HTTP_AUTH_TOKEN`; fila i repoet skal ha tom verdi |
+
+### T-19 · Koble Claude til remote-serveren
+
+**Ingen kodeendring.** Eneste endrede fil er `README.md`, som har fått seksjonen
+«Koble til Claude (HTTP)» ved siden av den eksisterende stdio-oppskriften. Hosten er
+**Claude Code 2.1.233**; Claude Desktop er fortsatt ikke installert på maskinen (samme
+forbehold som i T-02), så Desktop-delen er dokumentert, ikke klikket gjennom.
+
+Dette er siste oppgave i Epic 7 — **Epic 7 er ferdig** med T-19. Serveren kan nå kjøres som en
+stå-alene HTTP-tjeneste (T-17), er beskyttet av et bearer-token (T-18), og brukes av en ekte
+host over den transporten (T-19). Det som gjenstår i backloggen er bonusoppgavene T-20/T-21.
+
+#### Syntaksen — lest ut av CLI-en, ikke gjengitt fra hukommelsen
+
+`claude mcp add --help` gir eksemplene direkte, og de bekrefter utgangspunktet:
+
+```
+  # Add HTTP server with headers:
+  claude mcp add --transport http corridor https://app.corridor.dev/api/mcp --header "Authorization: Bearer ..."
+
+  -H, --header <header...>     Set WebSocket headers (e.g. -H "X-Api-Key: abc123")
+  -t, --transport <transport>  Transport type (stdio, sse, http). Defaults to stdio if not specified.
+  -s, --scope <scope>          Configuration scope (local, user, or project) (default: "local")
+```
+
+Merk at hjelpeteksten for `-H` sier «WebSocket headers» — det er en etterlevning i teksten;
+flagget er det som brukes for HTTP-servere, og headeren havner faktisk i konfigurasjonen (vist
+under). `--transport` har `stdio` som default, så flagget er **ikke** valgfritt her.
+
+Den faktisk kjørte kommandoen:
+
+```bash
+claude mcp add --transport http vacation-booking-http http://localhost:8080/mcp \
+  --header "Authorization: Bearer workshop-hemmelighet"
+```
+
+```
+Added HTTP MCP server vacation-booking-http with URL: http://localhost:8080/mcp to local config
+Headers: {
+  "Authorization": "[REDACTED]"
+}
+```
+
+CLI-en maskerer verdien i sin egen utskrift, men lagrer den i klartekst — oppføringen i
+`~/.claude.json` under `projects` → prosjektstien ble:
+
+```json
+"vacation-booking-http": {
+  "type": "http",
+  "url": "http://localhost:8080/mcp",
+  "headers": { "Authorization": "Bearer workshop-hemmelighet" }
+}
+```
+
+#### JSON-formen (`add-json`) virker også — og det gjør `${MILJØVARIABEL}`
+
+README bruker `add-json` for stdio-varianten, så formen ble verifisert for HTTP også. Hjelpeteksten
+sier «Add an MCP server (stdio or SSE) with a JSON string», men `"type":"http"` **fungerer**:
+
+```bash
+claude mcp add-json vacation-booking-http \
+  '{"type":"http","url":"http://localhost:8080/mcp","headers":{"Authorization":"Bearer workshop-hemmelighet"}}'
+# → Added http MCP server vacation-booking-http to local config → ✔ Connected
+```
+
+Det mest nyttige funnet her: **header-verdien ekspanderes fra miljøet.** Registrert med
+`"Authorization":"Bearer ${WORKSHOP_HTTP_AUTH_TOKEN}"` — `claude mcp get` viser fortsatt den
+uekspanderte teksten, men resultatet avhenger av miljøet til prosessen som starter `claude`:
+
+| Kjøring | Status |
+|---|---|
+| `WORKSHOP_HTTP_AUTH_TOKEN=workshop-hemmelighet claude mcp get vb-envvar` | `✔ Connected` |
+| `env -u WORKSHOP_HTTP_AUTH_TOKEN claude mcp get vb-envvar` | `✘ Failed to connect … (HTTP 401)` |
+
+Begge retninger er kjørt, så dette er en ekte ekspansjon og ikke en tilfeldighet. Det er svaret på
+hvordan man deler oppsettet med `-s project` (som skriver `.mcp.json` **inn i repoet**) uten å
+committe hemmeligheten — samme skille som stdio-oppskriften gjør mellom absolutt og relativ sti.
+
+#### Ende-til-ende: hosten kalte faktisk et verktøy over HTTP
+
+Serveren ble startet i bakgrunnen med et kjent token:
+
+```bash
+WORKSHOP_HTTP_AUTH_TOKEN=workshop-hemmelighet \
+  java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar --spring.profiles.active=http
+```
+
+```
+Tomcat started on port 8080 (http) … Registered tools: 11
+BearerTokenAuthFilter : MCP-endepunktet krever bearer-token (workshop.http.auth.token, 20 tegn).
+```
+
+Etter registreringen:
+
+```
+$ claude mcp list
+vacation-booking:      java -jar /Users/…/vacation-booking-mcp-0.0.1-SNAPSHOT.jar - ✔ Connected
+vacation-booking-http: http://localhost:8080/mcp (HTTP) - ✔ Connected
+```
+
+Og et **ekte verktøykall** gjennom hosten, ikke bare en helsesjekk:
+
+```bash
+claude -p "Bruk verktøyet about_application fra MCP-serveren vacation-booking-http …" \
+  --allowedTools "mcp__vacation-booking-http__about_application"
+```
+
+Svaret var teksten fra `AboutTool` ordrett («Dette er en ferie-booking MCP-server bygget i Spring
+Boot med Spring AI …»), altså returverdien fra prosessen vi selv startet — over HTTP, med tokenet.
+Serverloggen viser hvem som koblet seg på:
+
+```
+Client initialize request - Protocol: 2025-11-25,
+  Capabilities: ClientCapabilities[roots=RootCapabilities[listChanged=true], sampling=null,
+                                   elicitation=Elicitation[form=null, url=null]],
+  Info: Implementation[name=claude-code, title=Claude Code, version=2.1.233, …]
+```
+
+> Verdt å merke seg med tanke på bonusoppgavene: hosten annonserer `roots` og `elicitation`, men
+> **ikke** `sampling`. T-21 (sampling) har altså ingen mottaker i denne klienten; T-20
+> (elicitation) har det.
+
+#### Funnet som forklarer T-18-designet: glemt header ⇒ hosten prøver OAuth
+
+To feilregistreringer ble laget med vilje for å se hva deltakeren faktisk møter:
+
+| Registrering | Hva hosten sier |
+|---|---|
+| feil token i headeren | `✘ Failed to connect — Server rejected the configured Authorization header (HTTP 401). … OAuth fallback is disabled when headers.Authorization is set. Error detail: {"error":"unauthorized","message":"Send 'Authorization: Bearer <token>'. …"}` |
+| **ingen** header | `✘ Failed to connect — Dynamic Client Registration rejected (HTTP 401): {"error":"unauthorized", …}` |
+
+Den andre meldingen er den interessante. Uten en konfigurert `Authorization`-header leser hosten
+`401`-et vårt som starten på MCP-spesifikasjonens autorisasjonsflyt og prøver å oppdage en
+authorization server. Serverloggen viser hele sonderingen:
+
+```
+401 Unauthorized: GET  /.well-known/oauth-protected-resource/mcp   — mangler Authorization: Bearer <token>
+401 Unauthorized: GET  /.well-known/oauth-protected-resource       — mangler Authorization: Bearer <token>
+401 Unauthorized: GET  /.well-known/oauth-authorization-server     — mangler Authorization: Bearer <token>
+401 Unauthorized: GET  /.well-known/openid-configuration           — mangler Authorization: Bearer <token>
+401 Unauthorized: POST /register                                   — mangler Authorization: Bearer <token>
+```
+
+Tre ting følger av dette:
+
+1. **T-18-valget «filteret gjelder alle stier, ikke bare `/mcp`» får en konsekvens her.** Alle
+   fire well-known-endepunktene blir avvist, så oppdagelsen feiler raskt og entydig i stedet for
+   halvveis. En *ekte* OAuth-beskyttet MCP-server må gjøre det motsatte: svare på nettopp disse
+   stiene **uten** autentisering, og peke videre i `WWW-Authenticate`. Vår `realm`-utfordring er
+   altså formelt første steg i riktig flyt — vi har bare ikke steg to.
+2. **Headeren slår av OAuth-fallbacken.** Hostens egen melding sier det rett ut: «OAuth fallback
+   is disabled when `headers.Authorization` is set». Setter du headeren, får du en ren og lesbar
+   401-feil; glemmer du den, får du en villedende feilmelding om klientregistrering.
+3. **Det er dette som gjør et statisk token til et workshop-verktøy og ikke en løsning.** Hosten
+   har en ferdig, standardisert vei for remote-servere; vi bruker den ikke.
+
+#### Forskjellene en deltaker møter mot stdio
+
+| | stdio | HTTP |
+|---|---|---|
+| Hvem starter prosessen | hosten, ved sin egen oppstart | **du** — registrerer du en død adresse, får du `ConnectionRefused` umiddelbart |
+| Hva som står i konfigurasjonen | `command` + `args` | `type`/`url`/`headers` |
+| Auth | ingen; prosessen arver dine rettigheter | `Authorization: Bearer …`, på hvert kall — også `GET` (SSE) og `DELETE` |
+| Antall klienter | én prosess per host | én prosess, flere klienter samtidig, hver med sin sesjon |
+| Ny kode | `bootJar` + **restart av hosten** | `bootJar` + restart av **serveren**; konfigurasjonen i hosten er uendret |
+| Logg | hostens `mcp-server-*.log` (stderr) | serverens egen stdout — du ser den i terminalen der du startet den |
+| Databasen | én prosess per host, startet fra hostens katalog | én delt prosess, forutsigbar `vacation.db` i arbeidskatalogen |
+
+**Sesjon og reconnect — verifisert, ikke antatt.** Hosten holder ikke én evig sesjon. Fire
+uavhengige `initialize`-kall ble logget i økten: ett per `claude mcp list`/`get`-helsesjekk, ett
+fra `curl`, og ett fra `claude -p`-økten. Hver av dem fikk sin egen `Mcp-Session-Id`. Det betyr:
+
+- **Serveren ble stoppet** → `claude mcp get` sa `✘ Failed to connect — ConnectionRefused:
+  Unable to connect. Is the computer able to access the url?`
+- **Serveren ble startet igjen** → neste `claude mcp get` sa `✔ Connected`, **uten** at noe i
+  konfigurasjonen ble rørt.
+
+Det er den praktiske gevinsten mot stdio: der river `./gradlew clean` jar-en bort under en
+kjørende host (T-02-fallgruven), og hosten må restartes. Her restarter du bare serveren.
+Gamle sesjons-id-er dør riktignok med prosessen — T-17 viste `-32603 Session not found` for en
+id fra en avsluttet sesjon — men hosten forhandler en ny ved neste kall uten at deltakeren
+merker det.
+
+En liten kuriositet fra nedstengningen: med en åpen SSE-strøm fra hosten logger Spring
+`Graceful shutdown aborted with one or more requests still active`, og JVM-en kan bli hengende
+en stund etter `SIGTERM`. Porten frigis med én gang, så en ny server kan startes uansett; en
+`kill -9` avslutter resten.
+
+#### Claude Desktop: ærlig status
+
+Ikke installert på denne maskinen, så dette er dokumentert fra offisiell dokumentasjon og ikke
+verifisert i produktet:
+
+- **Remote-servere legges *ikke* i `claude_desktop_config.json`.** Den fila beskriver kommandoer
+  Desktop selv skal starte, altså stdio. Remote-servere legges inn under **Settings → Connectors
+  → Add custom connector**, der man oppgir en URL og deretter autentiserer seg slik serveren ber
+  om ([MCP · Connect to remote MCP servers](https://modelcontextprotocol.io/docs/develop/connect-remote-servers)).
+- **Den flyten har ikke noe felt for en fast header.** Autentiseringen er serverens egen —
+  i praksis OAuth. Et statisk bearer-token som vårt har altså ingen plass i dialogen. Det er
+  samme konklusjon som avsnittet over: hosten forventer OAuth av en remote server.
+- **Omveien som *er* verifisert: `mcp-remote` som stdio→HTTP-bro.** Det er en vanlig kommando,
+  så den passer i `claude_desktop_config.json`, og den kan sende en fast header. Den ble kjørt
+  mot vår server fra Claude Code (som starter nøyaktig samme kommando) og ga `✔ Connected`:
+
+  ```bash
+  npx -y mcp-remote http://localhost:8080/mcp --header "Authorization: Bearer workshop-hemmelighet"
+  ```
+
+  `--allow-http` var **ikke** nødvendig for `localhost` (testet begge veier, versjon 0.1.38).
+  Selve Desktop-oppsettet er ikke klikket gjennom — broen er det som er verifisert.
+
+Det pragmatiske rådet i README: bruk stdio-oppskriften i Desktop og HTTP-varianten i Claude Code.
+
+#### Utenfor localhost
+
+Alt over er bundet til loopback. For å slippe andre til:
+
+1. **Bind til noe annet enn loopback** — `--server.address=0.0.0.0` (Tomcat binder alle
+   grensesnitt som default, men vær eksplisitt), og åpne porten i brannmuren.
+2. **Legg en TLS-terminerende proxy foran**, så URL-en blir `https://…`. Uten den sendes tokenet
+   i klartekst i hver eneste forespørsel — inkludert `GET`-en som holder SSE-strømmen åpen — og
+   kan leses og gjenbrukes av hvem som helst på veien. Et statisk token over ren HTTP er
+   funksjonelt et passord ropt ut i rommet.
+3. **Bytt ut det statiske tokenet.** Utenfor en workshop-maskin holder det ikke: ingen bruker,
+   ingen scopes, ingen utløpstid, og ingen måte å trekke tilbake tilgangen for én klient. Svaret
+   er MCP-spesifikasjonens OAuth 2.1-modell — og som `/.well-known`-sonderingen over viser, er
+   det nøyaktig den hosten allerede prøver å bruke.
+
+#### Verifisering og opprydding
+
+**1. `./gradlew build` grønt** — **135 tester**, 0 feil, uendret fra T-16/T-17/T-18. Ingen
+produksjonskode er rørt i denne oppgaven.
+
+**2. Brukerens stdio-registrering er urørt.** `~/.claude.json` ble lest før og etter. Før:
+
+```json
+{"vacation-booking": {"command":"java","args":["-jar","/Users/…/vacation-booking-mcp-0.0.1-SNAPSHOT.jar"]}}
+```
+
+Etter at alt var ryddet: **bit for bit den samme oppføringen**, og `claude mcp list` viser
+fortsatt `vacation-booking … ✔ Connected`.
+
+**3. Alle midlertidige registreringer er fjernet.** Sju ble laget i local scope underveis —
+`vacation-booking-http`, `vb-feiltoken`, `vb-utentoken`, `vb-json`, `vb-envvar`, `vb-bridge`,
+`vb-bridge2` — og alle er borte igjen med `claude mcp remove … -s local`. Ingenting ble skrevet
+til user- eller project-scope, så `.mcp.json` finnes fortsatt ikke i repoet.
+
+**4. Ingen prosess henger igjen.** Begge bakgrunnsserverne ble stoppet; `pgrep` finner ingen
+`vacation-booking`-prosess, og `lsof -nP -iTCP:8080 -sTCP:LISTEN` er tom.
+
+**5. `vacation.db` er uendret.** Sikkerhetskopiert til scratchpad før kjøringen; SHA-256 er
+identisk før og etter (`4f49ce48…`). Alle kall var lesende. Hjelpefiler og serverlogger lå i
+scratchpad-katalogen, ikke i repoet.
