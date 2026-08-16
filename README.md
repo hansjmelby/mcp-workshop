@@ -121,8 +121,34 @@ Inspector skriver ut en URL i terminalen med et **auth-token**
 
 ### Koble til Claude (stdio)
 
-Legg serveren inn i host-konfigurasjonen som en stdio-server (Claude Desktop-eksempel). Bruk
-**absolutt sti** til jar-en:
+Serveren registreres som en stdio-server med **absolutt sti** til jar-en. Bygg den først
+(`./gradlew bootJar`).
+
+#### Claude Code (CLI)
+
+Kjør fra prosjektroten — `$(pwd)` fyller inn den absolutte stien for deg:
+
+```bash
+claude mcp add-json vacation-booking \
+  "{\"command\":\"java\",\"args\":[\"-jar\",\"$(pwd)/build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar\"]}"
+```
+
+Sjekk at den svarer:
+
+```bash
+claude mcp get vacation-booking     # skal vise "Status: ✔ Connected"
+```
+
+Serveren legges i **local scope** — privat for deg i dette prosjektet. Vil du dele
+oppsettet med de andre deltakerne, bruk `-s project` (skriver til `.mcp.json` i repoet),
+men da må stien være **relativ** (`build/libs/…`), siden en absolutt sti ikke fungerer på
+andre maskiner.
+
+Fjern den igjen med `claude mcp remove vacation-booking -s local`.
+
+#### Claude Desktop
+
+Legg dette inn i host-konfigurasjonen:
 
 ```json
 {
@@ -138,8 +164,17 @@ Legg serveren inn i host-konfigurasjonen som en stdio-server (Claude Desktop-eks
 > **Windows:** Stien må ha **doble backslash** i JSON — `"C:\\Users\\deg\\mcp-workshop\\build\\libs\\vacation-booking-mcp-0.0.1-SNAPSHOT.jar"`.
 > Enkelt backslash gjør JSON-en ugyldig, og Claude feiler stille uten en tydelig melding.
 > (Forward slashes fungerer også: `"C:/Users/deg/mcp-workshop/build/libs/…"`.)
+> `add-json`-kommandoen over er bash — kjør den i **Git Bash** eller **WSL**.
 
 Spør deretter Claude: «hva er denne applikasjonen?» — den skal bruke verktøyet.
+
+#### To ting som ofte forvirrer
+
+- **Serveren kobles opp ved oppstart.** Legger du den til mens Claude Code / Claude Desktop
+  kjører, dukker ikke verktøyene opp før du starter på nytt. (`/mcp` viser status.)
+- **Jar-en er et øyeblikksbilde.** Nye `@McpTool`-er blir ikke synlige før du har kjørt
+  `./gradlew bootJar` på nytt *og* restartet hosten. Dette er den vanligste grunnen til at
+  «verktøyet mitt vises ikke».
 
 ---
 
