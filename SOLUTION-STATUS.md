@@ -24,7 +24,7 @@ etterpå. Én commit per oppgave.
 | T-11 | Avvis overbooking | ✅ | Verifikasjonsoppgave — ingen ny forretningslogikk. Kapasitetsregnestykket kartlagt og verifisert gjennom protokollen (fyll opp → én over → kansellering frigjør); `description` på `create_booking` utvidet med hva modellen skal gjøre med «N ledige plasser», og `check_availability` presisert (`capacity` er total, ikke ledig); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-11--avvis-overbooking)) |
 | T-12 | `cancel_booking` | ✅ | `cancel_booking` lagt til i `tools/BookingTools.java` — **funksjonelt identisk** med `update_booking_status(id, CANCELLED)` (`BookingService.cancel` *er* `updateStatus(id, CANCELLED)`); eget verktøy likevel, av hensyn til katalogen: ett argument i stedet for to, og en `destructiveHint = true`-oppføring hosten kan gate på ved navn. Kapasitetsfrigjøringen verifisert gjennom protokollen (fyll opp → avvist → `cancel_booking` → **samme** booking går gjennom); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-12--cancel_booking)) |
 | T-13 | Destinasjoner som Resource | ✅ | Ny pakke `resources/` → `resources/DestinationResources.java` med **to** `@McpResource`: den statiske `destination://catalog` (havner i `resources/list`) og malen `destination://{id}` (havner i `resources/templates/list`). Første primitiv som ikke er et verktøy: innholdet er **`text/markdown`**, ikke JSON, fordi det legges rått i konteksten; felles ressurs-beslutninger etablert for T-14; test `resources/DestinationResourcesTest.java` med 7 tester ([se under](#t-13--destinasjoner-som-resource)) |
-| T-14 | Bookinger som Resource | ⬜ | — |
+| T-14 | Bookinger som Resource | ✅ | `resources/BookingResources.java` med **én** `@McpResource`: malen `booking://{id}` (`resources/templates/list`). **Bevisst ingen liste-ressurs** — bookinger er transaksjonsdata som endres midt i samtalen, og en foreldet liste rått i konteksten er verre enn ingen; `list_bookings` dekker behovet. Innholdet slår opp reisemålsnavnet og gjengir lovlige statusoverganger fra `BookingStatus.canTransitionTo`; `booking://1` gir nå innhold i stedet for SDK-ens `-32002`; test `resources/BookingResourcesTest.java` med 10 tester ([se under](#t-14--bookinger-som-resource)) |
 | T-15 | Prompts | ⬜ | — |
 | T-16 | `bookings_report` | ⬜ | — |
 | T-17 | Streamable HTTP-transport | ⬜ | — |
@@ -158,11 +158,12 @@ Spring AI legger **konstantnavnene inn i skjemaet** som en `enum`-liste, og — 
 
 ### Ressurser over MCP-grensen (avgjort i T-13 — følg denne)
 
-Gjelder T-13 ✅ og **T-14** (`booking://{id}`), som skal se lik ut. Alt er verifisert mot den
-ekte JSON-en; tracen ligger i [T-13-seksjonen](#t-13--destinasjoner-som-resource).
+Gjelder T-13 ✅ og T-14 ✅ (`booking://{id}`), som ser lik ut. Alt er verifisert mot den
+ekte JSON-en; tracen ligger i [T-13-seksjonen](#t-13--destinasjoner-som-resource), og T-14
+bekreftet punktene på nytt for en helt annen datatype ([T-14](#t-14--bookinger-som-resource)).
 
 - **Egen pakke `no.computas.vacationmcp.resources`**, klassenavn med suffikset `Resources`
-  (`DestinationResources` T-13 ✅, `BookingResources` T-14). Ressurser og verktøy blandes ikke i
+  (`DestinationResources` T-13 ✅, `BookingResources` T-14 ✅). Ressurser og verktøy blandes ikke i
   samme klasse — de har ulik bruker (modellen vs. applikasjonen/mennesket), ulikt svarformat og
   ulik feilkanal.
 - **Innholdet er lesbar tekst, `mimeType = "text/markdown"` — ikke JSON.** Dette er det motsatte
@@ -186,6 +187,13 @@ ekte JSON-en; tracen ligger i [T-13-seksjonen](#t-13--destinasjoner-som-resource
   Skriv derfor meldinger som hjelper *applikasjonen og mennesket*, ikke bare modellen. Å kaste
   `McpError.RESOURCE_NOT_FOUND` selv for å få spesifikasjonens `-32002` **virker ikke** i Spring
   AI 2.0.0 — se T-13 for hvorfor.
+- **Statisk ressurs bare for referansedata (avgjort i T-14).** T-13 laget `destination://catalog`
+  fordi katalogen er stabil, lik for alle og nyttig å legge ved *før* samtalen starter. T-14 laget
+  bevisst **ingen** `booking://list`: bookinger endres av verktøyene midt i samtalen, lista vokser
+  uten grense, og innhold som legges rått i konteksten og deretter blir foreldet er verre enn
+  ingen ressurs — modellen kan ikke se at teksten er utdatert. Volatile samlinger hører hjemme i et
+  verktøy (`list_bookings`), som gir et ferskt oppslag per kall. Begrunnelsen i sin helhet i
+  [T-14-seksjonen](#t-14--bookinger-som-resource).
 - **`title` og `annotations` på `@McpResource` er dødt i Spring AI 2.0.0** — `SyncMcpResourceProvider`
   leser bare `uri`, `name`, `description`, `mimeType` og `meta`. Verifisert: ingen av dem dukker
   opp i `resources/list`. Legg det klienten skal vise i `name` og `description`.
@@ -2202,3 +2210,112 @@ i en scratchpad-katalog utenfor repoet):
 Capability-blokken fra `initialize` er **uendret** fra T-00 (`"resources":{"subscribe":false,
 "listChanged":true}`) — den lovet allerede at metodene fantes; det som endret seg er at listene
 ikke lenger er tomme. Nøyaktig det poenget T-00 gjorde av capability-tabellen sin.
+
+### T-14 · Bookinger som Resource
+
+Andre ressursoppgave, og den følger [de felles ressurs-beslutningene](#ressurser-over-mcp-grensen-avgjort-i-t-13--følg-denne)
+fra T-13 uten avvik. To nye filer, ingen endringer i eksisterende kode:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/resources/BookingResources.java` | `@Component` med **én** `@McpResource`: malen `booking://{id}` |
+| `src/test/java/no/computas/vacationmcp/resources/BookingResourcesTest.java` | 10 tester (innhold, reisemålsnavn, id-en, prisformat, entall «1 natt», lovlige overganger, endestatus, ukjent id, ikke-numerisk id, at den er en mal) |
+
+#### Valget som faktisk måtte tas: ingen `booking://list`
+
+T-13 laget **to** ressurser — en statisk katalog og en mal. Her ble det bare malen, og det er
+oppgavens egentlige designspørsmål. Argumentene mot en booking-liste:
+
+1. **Bookinger er transaksjonsdata, katalogen er referansedata.** `destination://catalog` endres
+   ikke av noe verktøy i denne serveren; den er lik for alle og lik i morgen. Booking-lista endres
+   av `create_booking`, `update_booking_status` og `cancel_booking` — ofte *i samme samtale* som
+   den ble lest.
+2. **Ressursinnhold legges rått i konteksten og blir så liggende.** Det er hele forskjellen fra et
+   verktøykall: et `tools/call` gir et ferskt svar hver gang, mens ressursteksten er et
+   øyeblikksbilde uten holdbarhetsdato. En liste som sier `PENDING` etter at bookingen er
+   kansellert, er verre enn ingen liste — modellen kan ikke se at teksten er foreldet, og vil
+   svare selvsikkert feil. For *én* booking er risikoen den samme, men mye mindre: brukeren har
+   selv pekt på akkurat den, og `description` sier eksplisitt «les på nytt før du bekrefter en
+   status».
+3. **Ressurser er ment å kunne caches og velges.** MCP-klienter kan cache innhold per URI, og
+   `resources/list` er en meny et menneske blar i. «Alle bookinger» er ikke et dokument brukeren
+   peker på — det er et *spørsmål* («hvilke bookinger er ubetalte?»), og spørsmål er verb. Med
+   `list_bookings(status?)` har modellen allerede et filtrerbart, ferskt oppslag.
+4. **Lista har ingen øvre grense.** Katalogen er fem rader og blir det. Booking-tabellen vokser
+   ubegrenset, og en ressurs uten paginering (MCP har ingen for `resources/read`) er en
+   kontekstbombe.
+
+Tommelfingerregelen fra T-13 — **verktøy er verb, ressurser er substantiv** — holder altså
+fortsatt, men den må suppleres: *substantivet må også stå stille lenge nok til å være verdt å
+legge ved.* Regelen er skrevet inn i de felles beslutningene, og gjelder også for T-16-rapporten.
+
+#### Innholdet: nok til å oppsummere bookingen uten et oppfølgende oppslag
+
+```jsonc
+{"jsonrpc":"2.0","id":4,"result":{"contents":[{"uri":"booking://1","mimeType":"text/markdown","text":"# Booking 1 — Kari Nordmann\n\n- **id:** 1 — bruk denne i `get_booking`, `update_booking_status` og `cancel_booking`.\n- **Kunde:** Kari Nordmann\n- **Reisemål:** Kyoto Machiya (id 3), Japan\n- **Periode:** 2026-10-05 → 2026-10-08 (3 netter)\n- **Antall reisende:** 2\n- **Totalpris:** 9600 kr (låst ved bestilling — inkluderer eventuell sesongpris for perioden)\n- **Status:** PENDING — opprettet, men ikke bekreftet ennå\n- **Lovlige neste statuser:** CONFIRMED, CANCELLED\n"}]}}
+```
+
+Tre valg er verdt å merke seg:
+
+- **Reisemålet slås opp for å få navnet.** `Booking`-recorden har bare `destinationId`, og
+  «reisemål 3» hjelper hverken mennesket eller modellen med å oppsummere turen. Prisen er ett
+  ekstra `DestinationRepository.findById(...)` per lesning; gevinsten er at ressursen står på egne
+  bein — brukeren slipper å legge ved `destination://3` i tillegg. Dette er den motsatte
+  avveiningen av T-03, der verktøyene returnerer domene-recorden rå: en ressurs leses *som den er*,
+  så det som mangler i teksten, mangler i konteksten. Skulle reisemålet være borte, skriver
+  ressursen «ukjent reisemål (id N)» i stedet for å kaste — bookingen finnes fortsatt, og det er
+  den brukeren spurte om.
+- **Antall netter er regnet ut** (`ChronoUnit.DAYS.between`), med entall/flertall. Modellen *kan*
+  regne det selv, men presentasjonslogikk hører hjemme i ressurslaget nå som vi uansett formaterer
+  for hånd — og «3 netter» er det brukeren skal få høre.
+- **Lovlige neste statuser leses av tilstandsmaskinen**, ikke skrevet ned på nytt:
+  `Arrays.stream(BookingStatus.values()).filter(status::canTransitionTo)`. Da kan ikke teksten komme
+  ut av takt med regelen `BookingService.updateStatus(...)` faktisk håndhever. `COMPLETED` og
+  `CANCELLED` gir «ingen — dette er en endestatus» i stedet for en tom liste. Dette er det samme
+  poenget som i [T-09](#t-09--update_booking_status): `enum`-lista i `inputSchema` sier hvilke
+  verdier som finnes, ikke hvilke overganger som er lov *nå* — her får leseren endelig det siste.
+
+#### Verifisert gjennom protokollen
+
+Jar-en ble bygget på nytt, `vacation.db` sikkerhetskopiert før og lagt tilbake etter, og
+røyktesten kjørt i to faser (fase A oppretter en ekte booking med `tools/call create_booking` og
+plukker id-en fra svaret; fase B leser). Oppstartsloggen på stderr:
+
+```
+McpServerAutoConfiguration : Registered tools: 10
+McpServerAutoConfiguration : Registered resources: 1            <- uendret: fortsatt bare destination://catalog
+McpServerAutoConfiguration : Registered resource templates: 2   <- destination://{id} + booking://{id}
+```
+
+`resources/list` er altså **uendret** fra T-13 — beslutningen over er synlig i protokollen — mens
+`resources/templates/list` nå har to oppføringer. Feiltilfellene:
+
+```jsonc
+// booking://999999 — malen matcher, BookingService.get kaster NotFoundException
+{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Error invoking resource method: booking in no.computas.vacationmcp.resources.BookingResources. /nCause: Fant ingen booking med id 999999","data":"Fant ingen booking med id 999999"}}
+
+// booking://abc — vår egen parsing avviser den
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"… /nCause: «abc» er ikke en gyldig booking-id. URI-malen er booking://{id} der {id} er et heltall, f.eks. booking://7. Bruk `list_bookings` for å finne gyldige id-er.","data":"…"}}
+```
+
+**Det som endret seg siden T-13:** `booking://1` ga da `-32002 Resource not found` fra SDK-en selv,
+fordi hverken en ressurs eller en mal matchet URI-en. Nå matcher malen, metoden vår kjører, og
+svaret er innholdet over. Det er den enkleste mulige demonstrasjonen av at `-32002` betyr «ingen
+oppføring for denne URI-en» mens `-32602` betyr «oppføringen finnes, men kallet feilet» — to
+forskjellige feil som klientkoden med rette behandler ulikt.
+
+En sidegevinst av å droppe liste-ressursen: `booking://list` treffer nå malen og havner i
+`parseId`, som svarer «`«list»` er ikke en gyldig booking-id … Bruk `list_bookings` for å finne
+gyldige id-er». En klient (eller modell) som gjetter på en liste-URI blir altså dyttet mot riktig
+verktøy i stedet for å få «Resource not found».
+
+#### Verifisering i test
+
+**`./gradlew build` er grønt** — 107 tester (97 fra før + 10 nye i `BookingResourcesTest`). Til
+forskjell fra `DestinationResourcesTest` skriver denne klassen til databasen, så den følger
+opplegget fra `BookingToolsTest`: `DELETE FROM bookings` både `@BeforeEach` og `@AfterEach`. Uten
+det ville kapasiteten på Kyoto (3 plasser) vært oppbrukt av rester fra tidligere kjøringer, siden
+`build/test-vacation.db` overlever mellom kjøringer.
+
+Testene lager bookingene med `BookingService` direkte i stedet for via `BookingTools` — ressursen
+skal testes mot forretningslaget, ikke mot et annet MCP-lag.
