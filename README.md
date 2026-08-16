@@ -288,6 +288,8 @@ til remote HTTP-transport. Ta oppgavene i rekkefølge.
 
 - **«Appen henger» / ingen output:** Forventet — stdio-serveren venter på en klient. Logg
   går til konsollet (stderr) og til `logs/vacation-booking-mcp.log`.
+- **`WARN … BeanPostProcessorChecker` ved oppstart:** Ufarlig. Kommer fra Spring AI sin egen
+  autokonfigurasjon av annotasjons-scanneren, ikke fra din kode. Serveren starter normalt.
 - **Inspector «connection error»:** Bruk den tokeniserte URL-en, og kjør fra prosjektroten.
 - **Nullstille data:** Slett `vacation.db` i prosjektroten; den gjenskapes ved neste oppstart.
 - **Se registrerte verktøy ved oppstart:** styres av `workshop.log-registered-tools` i
