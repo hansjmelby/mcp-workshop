@@ -16,7 +16,7 @@ etterpå. Én commit per oppgave.
 | T-03 | `list_destinations` | ✅ | `tools/DestinationTools.java` → verktøyet `list_destinations`; test `tools/DestinationToolsTest.java` ([se under](#t-03--list_destinations)) |
 | T-04 | `search_destinations` | ✅ | `search_destinations` med tre valgfrie parametere i `tools/DestinationTools.java` (+ krysshenvisning fra `list_destinations`); felles feilhåndtering etablert; 6 nye tester ([se under](#t-04--search_destinations)) |
 | T-05 | `check_availability` | ✅ | `tools/AvailabilityTools.java` → verktøyet `check_availability` (`LocalDate`-parametere + `AvailabilityResult`-konvolutt); felles datobeslutning etablert; test `tools/AvailabilityToolsTest.java` med 9 tester ([se under](#t-05--check_availability)) |
-| T-06 | `get_quote` | ⬜ | — |
+| T-06 | `get_quote` | ✅ | `tools/PricingTools.java` → verktøyet `get_quote` (fire obligatoriske parametere — første ikke-tomme `required`; `Quote` returneres uendret); test `tools/PricingToolsTest.java` med 13 tester ([se under](#t-06--get_quote)) |
 | T-07 | `create_booking` | ⬜ | — |
 | T-08 | `get_booking` | ⬜ | — |
 | T-09 | `update_booking_status` | ⬜ | — |
@@ -50,7 +50,7 @@ etterpå. Én commit per oppgave.
 
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
-  `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06) ·
+  `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
   `BookingTools` (T-07–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
@@ -77,7 +77,7 @@ etterpå. Én commit per oppgave.
 ### Datoer over MCP-grensen (avgjort i T-05 — følg denne)
 
 **Bruk `java.time.LocalDate` som parametertype, ikke `String` med egen parsing.** Gjelder alle
-verktøy som tar imot datoer: T-05 ✅, og videre T-06 (`get_quote`), T-07 (`create_booking`) og
+verktøy som tar imot datoer: T-05 ✅, T-06 ✅, og videre T-07 (`create_booking`) og
 T-12 (`cancel_booking`) dersom de trenger datoer.
 
 Begge premissene er verifisert empirisk mot den ekte JSON-en (se
@@ -871,3 +871,123 @@ Treffet på 2026-08-15→2026-09-15 er verdt å merke seg: `findOverlapping` bru
 AND end_date > from`, altså **halvåpent** intervall, så en periode som bare delvis dekker
 spørringen kommer med. Det er riktig oppførsel for «hva er ledig rundt disse datoene?», men
 understreker hvorfor beskrivelsen må si at overlapp ikke er det samme som at oppholdet kan bookes.
+
+### T-06 · `get_quote`
+
+Det tynneste verktøyet så langt, og det første med et **ikke-tomt `required`**. To nye filer:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/tools/PricingTools.java` | `@Component` med `@McpTool(name = "get_quote")` → `PricingService.quote(...)` |
+| `src/test/java/no/computas/vacationmcp/tools/PricingToolsTest.java` | `@SpringBootTest` med 13 tester, alle tall regnet for hånd mot `data.sql` |
+
+Metodekroppen er **én linje**: `return pricing.quote(destinationId, from, to, numTravelers);`.
+Tjenesten gjør både valideringen (datoer, `numTravelers ≥ 1`, at reisemålet finnes og er
+tilgjengelig, at en periode dekker oppholdet) og utregningen. Til forskjell fra T-05, der det
+ikke fantes noen tjeneste å delegere til, er det her ingenting igjen til verktøylaget — og det
+er hele poenget med oppgaven.
+
+#### `Quote` returneres uendret — den har allerede hele regnestykket
+
+Oppgaveteksten sier «verktøyet ditt mapper bare `Quote` til et svar». Svaret her er at det
+ikke skal mappes i det hele tatt. Sjekklista fra oppgaven mot feltene i
+[`Quote`](src/main/java/no/computas/vacationmcp/service/Quote.java):
+
+| Modellen trenger | Feltet |
+|------------------|--------|
+| antall netter | `nights` |
+| prisen som ble brukt | `pricePerNight` |
+| var det sesongpris? | `pricePerNight` ≠ `destination.pricePerNight` ⇒ ja |
+| antall reisende | `numTravelers` |
+| totalpris | `totalPrice` |
+| hvilket opphold dette gjelder | `destination` (hele recorden), `from`, `to` |
+
+Sesongpris-spørsmålet er det eneste som ikke står som et eget felt, og det trengs ikke:
+`Quote` bærer med seg **hele** `Destination`-recorden, så den ordinære prisen per natt ligger
+ved siden av den som faktisk ble brukt. Er de ulike, gjaldt sesongpris. En egen konvolutt
+(à la `AvailabilityResult` i T-05) ville altså bare duplisert informasjon som allerede er der —
+og T-05-konvolutten fantes av en helt annen grunn: å gjøre en *tom liste* lesbar. Her finnes
+ingen tom-tilstand; enten prises oppholdet, eller så kastes en exception. Dermed gjelder
+T-03-konvensjonen rått: domene-record ut, ingen mapping-kode å vedlikeholde.
+
+#### `int`, ikke `Integer` — og den faktiske `inputSchema`-en
+
+`numTravelers` er obligatorisk, så det finnes ingen «ikke oppgitt» som må overleve som `null`.
+Da er primitiv `int` riktig — motsatt `Double maxPricePerNight` i T-04, der boksing var
+nødvendig nettopp fordi parameteren var valgfri. Verifisert gjennom protokollen mot den
+nybygde jar-en:
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "destinationId":  {"type": "integer", "format": "int64",  "description": "Id-en til reisemålet, slik den kommer fra `list_destinations` … En ukjent id gir en feil, ikke et tomt svar."},
+    "from":           {"type": "string",  "format": "date",   "description": "Innsjekksdato på ISO-8601-formatet yyyy-MM-dd …"},
+    "to":             {"type": "string",  "format": "date",   "description": "Utsjekksdato på ISO-8601-formatet yyyy-MM-dd … et opphold fra 1. til 10. er ni netter."},
+    "numTravelers":   {"type": "integer", "format": "int32",  "description": "Antall reisende, minst 1 … 0 eller et negativt tall avvises som feil."}
+  },
+  "required": ["destinationId", "from", "to", "numTravelers"]
+}
+```
+
+**`required` er endelig fylt ut** — kontrasten til T-04, der lista var tom med vilje. Merk
+formatene: `long → int64`, `int → int32`, `LocalDate → "string"/"date"` (T-05-beslutningen).
+
+Og til forskjell fra `format`, som bare er en annotasjon, **håndheves `required` faktisk** av
+serverens skjemavalidering, før metoden kalles. Et kall uten `numTravelers` ga:
+
+```jsonc
+{"content":[{"type":"text","text":"Tool (get_quote) input validation failed: Validation failed: JSON schema validation errors: [: påkrevd egenskap 'numTravelers' ikke funnet]"}],"isError":true}
+```
+
+Derfor er null-sjekken på datoene som T-05 måtte ha, unødvendig her — men den ligger uansett i
+`PricingService`, så meldingen er dekket dobbelt.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 48 tester (35 fra før + 13 nye). De nye dekker sesongpris,
+normalpris-fallback, at leddene henger sammen (`pricePerNight × nights × numTravelers ==
+totalPrice`), nedre grense `numTravelers = 1`, `0` og negativt antall, datoer utenfor enhver
+periode, et opphold som spenner over to *tilstøtende* perioder, delvis dekket opphold,
+`from` etter `to`, manglende datoer, ukjent reisemål, og to andre seedede reisemål.
+
+**2. Gjennom protokollen** — håndtrykk som i T-00, deretter `tools/list` og seks `tools/call`.
+Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (5): [about_application, check_availability, list_destinations, search_destinations, get_quote]`.
+
+| Argumenter | Resultat |
+|------------|----------|
+| `{"destinationId":1,"from":"2026-07-01","to":"2026-07-10","numTravelers":2}` | `isError:false`, `totalPrice: 39600.0` |
+| `{"destinationId":1,"from":"2026-09-05","to":"2026-09-10","numTravelers":2}` | `isError:false`, `totalPrice: 18500.0` (normalpris) |
+| `…,"numTravelers":0` | `isError:true`: `Error invoking method: getQuote` / `antall reisende må være minst 1` |
+| `{"destinationId":1,"from":"2026-12-01","to":"2026-12-10","numTravelers":2}` | `isError:true`: `Ingen tilgjengelig periode dekker 2026-12-01 til 2026-12-10` |
+| `{"destinationId":999,…}` | `isError:true`: `Fant ingen destinasjon med id 999` (`NotFoundException`) |
+| `numTravelers` utelatt | `isError:true`: skjemavalideringen, se JSON-en over |
+
+**Regnestykket, fra det faktiske `tools/call`-svaret** (id 3 over):
+
+```json
+{"destination":{"id":1,"name":"Lofoten Rorbuer","country":"Norge","description":"Tradisjonelle rorbuer med utsikt over fjorden.","pricePerNight":1850.0,"available":true},
+ "from":"2026-07-01","to":"2026-07-10","nights":9,"numTravelers":2,"pricePerNight":2200.0,"totalPrice":39600.0}
+```
+
+Kontrollregning mot `data.sql`: Lofoten koster ordinært **1850**/natt, men perioden
+2026-07-01→2026-08-31 (`availability` id 1) har `season_price = 2200.0`, så sesongprisen
+gjelder. 2026-07-01→2026-07-10 er **9 netter** (utsjekksdagen faktureres ikke), og med
+**2 reisende**: `2200 × 9 × 2 = 39 600`. Formelen fra akseptkriteriet stemmer, og modellen kan
+lese den av direkte: `pricePerNight: 2200.0` ved siden av `destination.pricePerNight: 1850.0`
+forteller at det *var* sesongpris, uten et eneste ekstra verktøykall.
+
+Det andre kallet er kontrollen på fallback-grenen: høstperioden (id 2) har
+`season_price = NULL`, så `1850 × 5 × 2 = 18 500` — og der er `pricePerNight` lik
+`destination.pricePerNight`.
+
+#### Fellen verktøybeskrivelsen måtte advare mot
+
+`findCovering` krever at **én** periode dekker hele oppholdet (`start_date <= from AND
+end_date >= to`), mens `check_availability` bruker `findOverlapping`. Et opphold
+2026-08-15→2026-09-15 gir derfor **to treff** i `check_availability`, men avvises av
+`get_quote` — periodene 1 og 2 er tilstøtende, ikke slått sammen. Det er lett for en modell å
+lese «to ledige perioder» som «kan bookes», så `description` sier det eksplisitt, og en egen
+test (`rejectsAStayThatSpansTwoAdjacentPeriods`) låser oppførselen.
