@@ -22,7 +22,7 @@ etterpå. Én commit per oppgave.
 | T-09 | `update_booking_status` | ✅ | `update_booking_status` lagt til i `tools/BookingTools.java` (første **enum** over MCP-grensen — `BookingStatus` gir `"enum":[…]` i skjemaet, og ugyldige verdier stoppes av skjemavalideringen; første verktøy med `destructiveHint = true` + `idempotentHint = true`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-09--update_booking_status)) |
 | T-10 | `list_bookings` | ✅ | `list_bookings` lagt til i `tools/BookingTools.java` (første **valgfrie enum** — `"enum":[…]` i skjemaet *og* tomt `required`; bar `List<Booking>` som svar, ingen konvolutt; krysshenvisning begge veier mot `get_booking`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-10--list_bookings)) |
 | T-11 | Avvis overbooking | ✅ | Verifikasjonsoppgave — ingen ny forretningslogikk. Kapasitetsregnestykket kartlagt og verifisert gjennom protokollen (fyll opp → én over → kansellering frigjør); `description` på `create_booking` utvidet med hva modellen skal gjøre med «N ledige plasser», og `check_availability` presisert (`capacity` er total, ikke ledig); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-11--avvis-overbooking)) |
-| T-12 | `cancel_booking` | ⬜ | — |
+| T-12 | `cancel_booking` | ✅ | `cancel_booking` lagt til i `tools/BookingTools.java` — **funksjonelt identisk** med `update_booking_status(id, CANCELLED)` (`BookingService.cancel` *er* `updateStatus(id, CANCELLED)`); eget verktøy likevel, av hensyn til katalogen: ett argument i stedet for to, og en `destructiveHint = true`-oppføring hosten kan gate på ved navn. Kapasitetsfrigjøringen verifisert gjennom protokollen (fyll opp → avvist → `cancel_booking` → **samme** booking går gjennom); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-12--cancel_booking)) |
 | T-13 | Destinasjoner som Resource | ⬜ | — |
 | T-14 | Bookinger som Resource | ⬜ | — |
 | T-15 | Prompts | ⬜ | — |
@@ -52,7 +52,8 @@ etterpå. Én commit per oppgave.
   med suffikset `Tools`. Planlagt fordeling:
   `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
   `BookingTools` (T-07 ✅, T-08 ✅, T-09 ✅, T-10 ✅, T-11 ✅ — ingen nytt verktøy, bare
-  `description`, T-12). `AboutTool` (entall) står igjen som
+  `description`, T-12 ✅). Fordelingen holdt hele veien: `BookingTools` fikk fem verktøy og
+  beholdt sin ene konstruktør-avhengighet. `AboutTool` (entall) står igjen som
   eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
@@ -64,7 +65,7 @@ etterpå. Én commit per oppgave.
   (`AbstractMcpToolMethodCallback.convertValueToCallToolResult`). Begrunnelse i T-03-seksjonen.
 - **`annotations`-hintene settes bevisst.** Lesende verktøy:
   `readOnlyHint = true, destructiveHint = false, idempotentHint = true, openWorldHint = false`.
-  Skrivende verktøy (T-07 ✅, T-09 ✅, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
+  Skrivende verktøy (T-07 ✅, T-09 ✅, T-12 ✅) skal *ikke* arve dette — sett `readOnlyHint = false` og
   vurder `destructiveHint`/`idempotentHint` selv; se
   [T-07-seksjonen](#t-07--create_booking) for den første faktiske hint-blokken og
   begrunnelsen hint for hint. Merk at `destructiveHint` og `idempotentHint` bare er
@@ -88,8 +89,9 @@ etterpå. Én commit per oppgave.
 ### Datoer over MCP-grensen (avgjort i T-05 — følg denne)
 
 **Bruk `java.time.LocalDate` som parametertype, ikke `String` med egen parsing.** Gjelder alle
-verktøy som tar imot datoer: T-05 ✅, T-06 ✅, og videre T-07 (`create_booking`) og
-T-12 (`cancel_booking`) dersom de trenger datoer.
+verktøy som tar imot datoer: T-05 ✅, T-06 ✅ og T-07 ✅ (`create_booking`). T-12
+(`cancel_booking`) landet uten datoer i det hele tatt — den identifiserer bookingen med `id`
+alene — så beslutningen berører ikke det verktøyet.
 
 Begge premissene er verifisert empirisk mot den ekte JSON-en (se
 [T-05-seksjonen](#t-05--check_availability) for tracen):
@@ -1777,3 +1779,165 @@ i ett kall, ikke-overlappende datoer) er **ikke** duplisert.
 > **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07–T-10. Fila ble kopiert før
 > kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptet lå
 > i en scratchpad-katalog utenfor repoet.
+
+### T-12 · `cancel_booking`
+
+Femte og siste verktøy i `BookingTools`, og **siste oppgave i Epic 4**. Ingen nye filer:
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | nytt `@McpTool(name = "cancel_booking")` → `BookingService.cancel(id)`; `update_booking_status` og `list_bookings` fikk krysshenvisning til det; klasse-javadoc oppdatert (klassen er komplett) |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | 7 nye tester (kansellering fra hver ikke-terminal status, allerede kansellert, `COMPLETED`, ukjent id, frigjort kapasitet, og at de to veiene gir samme resultat) |
+
+Metodekroppen er igjen **én linje**: `return bookings.cancel(id);`.
+
+#### Er dette bare `update_booking_status(id, CANCELLED)`? Ja — les koden
+
+Dette er det åpenbare spørsmålet, og svaret skal ikke pyntes på. `BookingService.cancel(...)`
+er bokstavelig talt én setning:
+
+```java
+/** Kanseller en booking (frigjør kapasitet). */
+public Booking cancel(long id) {
+    return updateStatus(id, BookingStatus.CANCELLED);
+}
+```
+
+Altså **samme metode**: samme tilstandsmaskin (`BookingStatus.canTransitionTo(...)`), samme
+`UPDATE`, samme `ValidationException`/`NotFoundException` med ordrett samme tekster, samme
+returverdi. Kaller du `cancel_booking(3)` eller `update_booking_status(3, CANCELLED)` er
+databasen etterpå ikke til å skille fra hverandre — og heller ikke JSON-en klienten får. Det er
+verifisert i test (`cancelBookingIsTheSameOperationAsUpdatingTheStatusToCancelled`), ikke antatt.
+
+Så hvorfor et eget verktøy? **Ikke fordi det gjør noe annet, men fordi det er en annen oppføring
+i katalogen.** To grunner, og begge handler om hva som er lettest å treffe riktig:
+
+1. **Navnet er det sterkeste signalet modellen får** — sterkere enn prosa i `description`, som
+   den kan lese fort eller hoppe over. «Kanseller booking 3» treffer `cancel_booking` direkte.
+   Veien om `update_booking_status` krever ett steg til: å velge riktig verdi blant fem i
+   enum-et. Og en bom der er ikke en feilmelding — det er en **annen lovlig endring**.
+   `COMPLETED` på en `PAID`-booking er en gyldig overgang som stille markerer oppholdet som
+   *gjennomført* i stedet for *avlyst*, og feilen oppdages først når kunden ikke får pengene
+   igjen. `cancel_booking` har ett obligatorisk argument og ingen verdi å bomme på, så hele den
+   feilklassen forsvinner. Skjemaene ved siden av hverandre gjør forskjellen konkret:
+
+   ```jsonc
+   // cancel_booking                 // update_booking_status
+   "required": ["id"]                // "required": ["id", "status"]
+   // properties: id                 // properties: id, status ("enum":[…5 verdier])
+   ```
+
+2. **`annotations` festes til verktøyet, ikke til argumentverdien.** Dette er det
+   hint-mekanismen kan uttrykke som en generisk statusendring ikke kan. `update_booking_status`
+   må bære **verste fall for alle fem verdiene**: det er `CANCELLED` som gjør at hintet må være
+   `destructiveHint = true`, mens `PENDING → CONFIRMED` er ren, additiv framdrift. En host kan
+   ikke sette regler per argumentverdi — den ser verktøynavnet og hint-blokken, ingenting annet.
+   Med kanselleringen som egen oppføring kan hosten gate, logge eller kreve bekreftelse på
+   *akkurat* den handlingen ved navn, i stedet for på «alt som kan skje med `status`-feltet».
+   Merk at poenget ikke er at hint-**verdiene** blir andre — de er ordrett de samme som i T-09,
+   se blokkene under — men **hvilket kall de henger på**.
+
+At `CANCELLED` fortsatt er en lovlig verdi i `update_booking_status` er et bevisst valg:
+enum-et kommer fra Java-typen `BookingStatus` (T-09), og å fjerne én konstant fra skjemaet ville
+krevd en egen enum-type bare for MCP-laget. Duplisering av domenet, for en gevinst
+`description` dekker billigere — den peker nå eksplisitt videre: «Skal du **kansellere**, bruk
+`cancel_booking` i stedet.»
+
+#### `annotations`: det mest destruktive verktøyet i settet
+
+```jsonc
+// cancel_booking (T-12)                       // update_booking_status (T-09)
+"annotations": {                               // "annotations": {
+  "title": "Kanseller booking",                //   "title": "Endre bookingstatus",
+  "readOnlyHint": false,                       //   "readOnlyHint": false,
+  "destructiveHint": true,                     //   "destructiveHint": true,
+  "idempotentHint": true,                      //   "idempotentHint": true,
+  "openWorldHint": false                       //   "openWorldHint": false
+}                                              // }
+```
+
+Begge blokkene er hentet ordrett fra det samme `tools/list`-svaret, og de er **identiske** — som
+de skal være, når operasjonen er den samme. Hint for hint:
+
+- **`readOnlyHint = false`** — et `UPDATE` mot `bookings`. Hosten skal behandle kallet som en
+  handling, ikke som et oppslag.
+- **`destructiveHint = true`** — dette er det eneste verktøyet der alle tre pekene i
+  spesifikasjonen peker samme vei samtidig: `status` **overskrives** (den forrige verdien er
+  borte), `CANCELLED` er en **endestasjon** uten vei tilbake i tilstandsmaskinen, og handlingen
+  **frigjør plassene til andre**. Det siste er verdt å dvele ved: selv om raden ligger igjen, kan
+  effekten være umulig å reversere i praksis — er plassene tatt av noen andre i mellomtiden,
+  hjelper det ikke å opprette en ny booking. Kontrasten er `create_booking` (T-07), som gjør et
+  rent `INSERT` der ingenting går tapt, og der `false` er riktig svar.
+- **`idempotentHint = true`** — spørsmålet oppgaven ber om å tenke gjennom: *hva skjer ved to
+  kanselleringer på rad?* `BookingStatus.ALLOWED` gir `CANCELLED` et **tomt** sett med lovlige
+  overganger, så heller ikke til seg selv. Kall nummer to slår derfor i tilstandsmaskinen og gir
+  `Ulovlig statusovergang: CANCELLED -> CANCELLED`. Kallet **feiler**, men databasen er bit for
+  bit den samme etter kall to som etter kall ett: ingen ekstra plasser frigjøres, ingen rad røres.
+  Hintet handler om **effekten** av gjentatte kall, ikke om svaret — altså idempotent, og et
+  retry etter timeout er trygt. Nøyaktig samme resonnement som i T-09, og motsatt av
+  `create_booking`, der kall to gir en *ny* booking med ny id.
+- **`openWorldHint = false`** — fortsatt bare vår egen SQLite-base. Ingen ekstern booking-partner
+  å avbestille hos, ingen refusjon å be om.
+
+`description` kompenserer for at hintene er *advisory* og at modellen ikke nødvendigvis ser dem:
+at kanselleringen er endelig, at raden blir liggende i `list_bookings`, at plassene frigjøres —
+og at en «Ulovlig statusovergang: CANCELLED -> CANCELLED» som regel betyr at det *første* kallet
+gikk gjennom, så modellen skal bekrefte med `get_booking` framfor å prøve igjen.
+
+#### Akseptkriteriet: frigjort kapasitet, verifisert gjennom protokollen
+
+Røyktest mot `build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar` (håndtrykk som i T-00, deretter
+`tools/list` og tolv `tools/call`). Reisemålet er **Kyoto Machiya (id 3)** — 1600/natt, én
+periode `2026-10-01→2026-11-30`, **kapasitet 3**. T-11 gjorde det tilsvarende med
+`update_booking_status`; her er det den dedikerte inngangen som frigjør plassene.
+
+| # | Kall | Resultat |
+|---|------|----------|
+| 1 | `create_booking` Ola, 10-05→10-08, **3** | `isError:false`, `id: 1` — hele kapasiteten er brukt opp |
+| 2 | `create_booking` Kari, 10-06→10-09, **2** | `isError:true`: **`Ikke nok kapasitet i perioden: 0 ledige plasser, 2 forespurt`** |
+| 3 | **`cancel_booking` `{"id":1}`** | `isError:false`, hele bookingen tilbake med `"status":"CANCELLED"` |
+| 4 | `create_booking` Kari, 10-06→10-09, **2** — **nøyaktig samme kall som #2** | `isError:false`, `id: 2`, `status: PENDING` ✅ |
+| 5 | `cancel_booking` `{"id":1}` (igjen) | `isError:true`: `Ulovlig statusovergang: CANCELLED -> CANCELLED` — ingen ekstra effekt |
+| 6 | `cancel_booking` `{"id":999}` | `isError:true`: `Fant ingen booking med id 999` |
+| 7 | `cancel_booking` `{}` | `isError:true`: **skjemavalideringen**, `påkrevd egenskap 'id' ikke funnet` |
+| 8 | `list_bookings` `{}` | `isError:false`, **begge** — den kansellerte ligger igjen med `CANCELLED` |
+| 9–11 | `update_booking_status` id 2 → `CONFIRMED` → `PAID` → `COMPLETED` | alle `isError:false` |
+| 12 | `cancel_booking` `{"id":2}` | `isError:true`: `Ulovlig statusovergang: COMPLETED -> CANCELLED` |
+
+Rad 2 → 3 → 4 **er** akseptkriteriet, og de tre svarene ordrett fra tekstblokkene:
+
+```jsonc
+// 2) avvist mens det er fullt
+{"content":[{"type":"text","text":"Error invoking method: createBooking\nIkke nok kapasitet i perioden: 0 ledige plasser, 2 forespurt"}],"isError":true}
+
+// 3) cancel_booking — bare status er endret, resten er byte for byte som ved oppretting
+{"id":1,"customerName":"Ola Nordmann","destinationId":3,"startDate":"2026-10-05","endDate":"2026-10-08","numTravelers":3,"totalPrice":14400.0,"status":"CANCELLED"}
+
+// 4) samme forespørsel som i 2, nå godtatt
+{"id":2,"customerName":"Kari Nordmann","destinationId":3,"startDate":"2026-10-06","endDate":"2026-10-09","numTravelers":2,"totalPrice":9600.0,"status":"PENDING"}
+```
+
+Mekanismen er `status <> 'CANCELLED'` i `BookingRepository.sumActiveTravelers` (kartlagt i
+[T-11](#t-11--avvis-overbooking), punkt 2): plassene frigjøres i det statusen settes, uten at
+raden slettes. Rad 8 viser begge halvdelene samtidig — den kansellerte bookingen er fortsatt i
+lista, men teller ikke lenger med. Kontrollregning mot `data.sql`: Kyoto 1600/natt uten
+sesongpris, `1600 × 3 netter × 3 reisende = 14 400` og `1600 × 3 × 2 = 9600`.
+
+Stderr bekreftet registreringen — **ti** verktøy, og Epic 3–4 er dermed komplett:
+`Tilgjengelige MCP-tools (10): [about_application, check_availability, create_booking, get_booking, list_bookings, cancel_booking, update_booking_status, list_destinations, search_destinations, get_quote]`.
+
+> **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07–T-11. Fila ble kopiert før
+> kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptet
+> lå i en scratchpad-katalog utenfor repoet.
+
+#### Verifisering i test
+
+**`./gradlew build` er grønt** — 90 tester (83 fra før + 7 nye i `BookingToolsTest`, som nå har
+42). De nye dekker: at kanselleringen lagres og at bare `status` er rørt; kansellering fra alle
+tre ikke-terminale statusene gjennom det nye verktøyet; en allerede kansellert booking (avvist,
+men bit for bit uendret — `idempotentHint = true` i praksis); en `COMPLETED` booking som ikke kan
+avlyses; ukjent id; **akseptkriteriet** (fyll opp → avvist → `cancel_booking` → samme booking går
+gjennom, og den kansellerte raden ligger fortsatt i `list_bookings`); og at de to veiene til
+`CANCELLED` gir samme resultat. Testene fra T-09/T-11 som allerede kansellerer via
+`update_booking_status` er **ikke** duplisert — de nye bruker med vilje den nye inngangen. Samme
+opprydding som resten av klassen (`DELETE FROM bookings` i `@BeforeEach` + `@AfterEach`).

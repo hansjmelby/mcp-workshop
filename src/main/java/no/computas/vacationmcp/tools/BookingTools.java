@@ -12,11 +12,12 @@ import org.springframework.stereotype.Component;
 /**
  * MCP-verktøy for booking-arbeidsflyten (Epic 3–4 i {@code BACKLOG.md}).
  *
- * <p>Klassen er hjemmet til hele booking-domenet og vokser gjennom T-07–T-12:
+ * <p>Klassen er hjemmet til hele booking-domenet og er komplett etter T-12:
  * {@code create_booking} (T-07), {@code get_booking} (T-08),
  * {@code update_booking_status} (T-09), {@code list_bookings} (T-10) og
- * {@code cancel_booking} (T-12). Alle går mot den samme {@link BookingService}-en, så
- * konstruktøren skal ikke trenge flere avhengigheter etter hvert som verktøyene kommer til.
+ * {@code cancel_booking} (T-12). Alle fem går mot den samme {@link BookingService}-en, så
+ * konstruktøren har hele veien klart seg med én avhengighet — det som kom til underveis var
+ * metoder, ikke felt.
  *
  * <p>Som de andre {@code *Tools}-klassene er dette en ren fasade: tjenesten validerer,
  * beregner pris, håndhever kapasitet og tilstandsmaskin. Verktøyene her legger ingen regler
@@ -311,6 +312,11 @@ public class BookingTools {
                     betyr som regel at det forrige kallet gikk gjennom, ikke at noe er galt. \
                     Sjekk med `get_booking` framfor å prøve på nytt.
 
+                    Skal du **kansellere**, bruk `cancel_booking` i stedet. Det er nøyaktig samme \
+                    operasjon som `CANCELLED` her, men med ett argument i stedet for to, så det \
+                    finnes ingen statusverdi å bomme på. Bruk dette verktøyet til å flytte en \
+                    booking *framover* i livssyklusen.
+
                     Svaret er hele den oppdaterte bookingen, med `status` satt til den nye \
                     verdien og resten av feltene uendret. Ulovlige overganger avvises med \
                     «Ulovlig statusovergang: FRA -> TIL», og en ukjent id med «Fant ingen booking \
@@ -408,8 +414,8 @@ public class BookingTools {
                     kapasiteten.
 
                     Verktøyet **endrer ingenting** og kan trygt kalles på nytt. Bruk \
-                    `create_booking` for å opprette en booking og `update_booking_status` for å \
-                    flytte en videre i livssyklusen.""",
+                    `create_booking` for å opprette en booking, `update_booking_status` for å \
+                    flytte en videre i livssyklusen, og `cancel_booking` for å avlyse en.""",
             annotations =
                     @McpTool.McpAnnotations(
                             title = "List bookinger",
@@ -435,5 +441,117 @@ public class BookingTools {
         // null = alle: BookingService.list velger mellom findAll() og findByStatus(...).
         // Ingen filtrering, sortering eller innpakning her — repository-et sorterer på id.
         return bookings.list(status);
+    }
+
+    /**
+     * Kansellerer en booking ved å delegere til {@link BookingService#cancel(long)}, som frigjør
+     * plassene bookingen holdt på i perioden.
+     *
+     * <p><b>Forholdet til {@code update_booking_status}: operasjonen er identisk.</b> Det er verdt
+     * å si rett ut, siden det er det åpenbare spørsmålet oppgaven reiser.
+     * {@link BookingService#cancel(long)} er én linje — {@code updateStatus(id, CANCELLED)} — så
+     * samme tilstandsmaskin, samme {@code UPDATE}, samme feilmeldinger og samme returverdi. Et
+     * {@code cancel_booking(3)} og et {@code update_booking_status(3, CANCELLED)} er ikke til å
+     * skille fra hverandre i databasen etterpå. Verktøyet finnes altså <em>ikke</em> fordi det gjør
+     * noe annet, men fordi det er en annen <em>oppføring i katalogen</em>:
+     *
+     * <ul>
+     *   <li><b>Navnet er det sterkeste signalet modellen får.</b> «Kanseller booking 3» treffer
+     *       {@code cancel_booking} direkte. Veien om {@code update_booking_status} krever at
+     *       modellen i tillegg velger riktig verdi blant fem i enum-et — og en bom der er ikke en
+     *       feilmelding, men en <em>annen</em> lovlig endring: {@code COMPLETED} på en
+     *       {@code PAID}-booking er en gyldig overgang som stille markerer oppholdet som
+     *       gjennomført i stedet for avlyst. Ett obligatorisk argument i stedet for to fjerner hele
+     *       den feilklassen.
+     *   <li><b>Granulariteten i {@code annotations} følger verktøyet, ikke argumentverdien.</b>
+     *       {@code update_booking_status} må bære verste fall for alle fem verdiene: det er
+     *       {@code CANCELLED} som gjør at hintet er {@code destructiveHint = true}, mens
+     *       {@code PENDING → CONFIRMED} er ren framdrift. En host kan ikke sette regler per
+     *       argumentverdi — den ser bare verktøynavnet og hint-blokken. Med kanselleringen som
+     *       egen oppføring kan hosten gate, logge eller kreve bekreftelse på <em>akkurat</em> den
+     *       handlingen ved navn. Det er dette en generisk statusendring ikke kan uttrykke, og
+     *       merk at poenget ikke er at hint-<em>verdiene</em> blir andre (de er ordrett de samme
+     *       som i T-09), men hvilket kall de henger på.
+     * </ul>
+     *
+     * <p><b>Hintene — samme blokk som {@code update_booking_status}, og det er riktig:</b>
+     *
+     * <ul>
+     *   <li>{@code readOnlyHint = false} — et {@code UPDATE} mot {@code bookings}. Hosten skal
+     *       behandle kallet som en handling, ikke som et oppslag.
+     *   <li>{@code destructiveHint = true} — dette er det mest destruktive verktøyet i settet, og
+     *       det eneste stedet hvor alle tre pekene i spesifikasjonen peker samme vei samtidig:
+     *       {@code status} <em>overskrives</em> (den forrige verdien er borte), {@code CANCELLED}
+     *       er en <b>endestasjon</b> uten vei tilbake, og handlingen frigjør plassene til andre —
+     *       så selv om raden ligger igjen, kan effekten være umulig å reversere i praksis: er
+     *       plassene tatt av noen andre i mellomtiden, hjelper det ikke å opprette en ny booking.
+     *       {@code create_booking} (T-07) er kontrasten: et rent {@code INSERT} der ingenting går
+     *       tapt, og der {@code false} er riktig.
+     *   <li>{@code idempotentHint = true} — spørsmålet oppgaven ber om å tenke gjennom: hva skjer
+     *       ved to kanselleringer på rad? Det første kallet flytter bookingen til
+     *       {@code CANCELLED}. Det andre slår i tilstandsmaskinen —
+     *       {@link BookingStatus#canTransitionTo(BookingStatus)} har et <em>tomt</em> sett for
+     *       {@code CANCELLED}, så en overgang til seg selv er ikke en kant — og gir
+     *       {@code ValidationException("Ulovlig statusovergang: CANCELLED -> CANCELLED")}. Kallet
+     *       <em>feiler</em>, men databasen er identisk etter kall to som etter kall ett, og hintet
+     *       handler nettopp om <b>effekten</b> av gjentatte kall, ikke om svaret. Ingen ekstra
+     *       plasser frigjøres, ingen rad røres. Altså idempotent, og et retry etter timeout er
+     *       trygt. Konsekvensen for modellen står i {@code description}: en «Ulovlig statusovergang:
+     *       CANCELLED -&gt; CANCELLED» betyr som regel at det <em>første</em> kallet gikk gjennom.
+     *   <li>{@code openWorldHint = false} — fortsatt bare vår egen SQLite-base. Ingen ekstern
+     *       booking-partner å avbestille hos, ingen refusjon å be om.
+     * </ul>
+     */
+    @McpTool(
+            name = "cancel_booking",
+            title = "Kanseller booking",
+            description =
+                    """
+                    Kansellerer en booking: setter status til `CANCELLED` og **frigjør plassene** \
+                    den holdt på, slik at andre kan booke dem. Bruk dette verktøyet når brukeren \
+                    vil avlyse, avbestille eller «slette» en booking — det er ett argument og \
+                    ingen statusverdi å bomme på. `update_booking_status` gjør det samme med \
+                    `CANCELLED`, men er til for å flytte en booking *framover* i livssyklusen \
+                    (`CONFIRMED`, `PAID`, `COMPLETED`).
+
+                    Kanselleringen er **endelig**. `CANCELLED` er en endestasjon, så bookingen kan \
+                    ikke gjenopplives etterpå — vil brukeren likevel reise, må du opprette en ny \
+                    med `create_booking`, og da er det ingen garanti for at plassene fortsatt er \
+                    ledige. Bekreft derfor med brukeren før du kaller verktøyet, og slå gjerne opp \
+                    bookingen med `get_booking` først, så du kansellerer riktig id.
+
+                    Svaret er hele den kansellerte bookingen, med `status` satt til `CANCELLED` og \
+                    resten av feltene uendret. Raden **blir liggende**: den dukker fortsatt opp i \
+                    `list_bookings`, men teller ikke lenger mot kapasiteten i perioden, så et \
+                    `create_booking` som nettopp ble avvist med «Ikke nok kapasitet …» kan gå \
+                    gjennom rett etterpå.
+
+                    To ting avvises, og ingen av dem endrer noe: en ukjent id gir «Fant ingen \
+                    booking med id N», og en booking som allerede er avsluttet gir «Ulovlig \
+                    statusovergang: COMPLETED -> CANCELLED» eller «Ulovlig statusovergang: \
+                    CANCELLED -> CANCELLED». Den siste betyr som regel at kanselleringen din \
+                    allerede gikk gjennom — bekreft med `get_booking` i stedet for å prøve på \
+                    nytt.""",
+            annotations =
+                    @McpTool.McpAnnotations(
+                            title = "Kanseller booking",
+                            readOnlyHint = false,
+                            destructiveHint = true,
+                            idempotentHint = true,
+                            openWorldHint = false))
+    public Booking cancelBooking(
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Id-en til bookingen som skal kanselleres, slik den kom fra \
+                                    `create_booking`, `get_booking` eller `list_bookings`. En \
+                                    ukjent id gir en feilmelding, og ingenting endres — ikke \
+                                    gjett, og ikke prøv deg fram med flere id-er.""")
+                    long id) {
+        // Ingen forhåndssjekk av statusen her: BookingService.cancel er updateStatus(id,
+        // CANCELLED), som spør tilstandsmaskinen og kaster ValidationException (ulovlig overgang)
+        // eller NotFoundException (ukjent id). Begge får boble ut (T-04).
+        return bookings.cancel(id);
     }
 }

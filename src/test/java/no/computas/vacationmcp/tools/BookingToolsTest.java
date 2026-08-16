@@ -698,4 +698,143 @@ class BookingToolsTest {
                                 3)
                         .totalPrice());
     }
+
+    // --- T-12 · cancel_booking ----------------------------------------------------------
+    //
+    // BookingService.cancel(id) er én linje: updateStatus(id, CANCELLED). Testene under bruker
+    // derfor med vilje det *nye* verktøyet som inngang, i stedet for å gjenta T-09/T-11 sine
+    // kall via update_booking_status — poenget er at den dedikerte oppføringen i katalogen gir
+    // nøyaktig samme resultat, inkludert den frigjorte kapasiteten.
+
+    /** Kanselleringen lagres, og bare {@code status} er rørt — resten av raden er uendret. */
+    @Test
+    void cancelBookingSetsCancelledAndLeavesTheRestOfTheRowUntouched() {
+        Booking opprettet = bookingStartingOn(5);
+
+        Booking kansellert = tools.cancelBooking(opprettet.id());
+
+        assertEquals(BookingStatus.CANCELLED, kansellert.status());
+        // Endringen er lagret, ikke bare returnert.
+        assertEquals(BookingStatus.CANCELLED, tools.getBooking(opprettet.id()).status());
+        assertEquals(
+                new Booking(
+                        opprettet.id(),
+                        opprettet.customerName(),
+                        opprettet.destinationId(),
+                        opprettet.startDate(),
+                        opprettet.endDate(),
+                        opprettet.numTravelers(),
+                        opprettet.totalPrice(),
+                        BookingStatus.CANCELLED),
+                kansellert);
+    }
+
+    /**
+     * Kansellering er lovlig fra alle tre ikke-terminale statusene — også gjennom det dedikerte
+     * verktøyet, som ikke legger noen egen forhåndssjekk oppå tilstandsmaskinen.
+     */
+    @Test
+    void cancelBookingWorksFromEveryNonTerminalStatus() {
+        long fraPending = bookingStartingOn(5).id();
+
+        long fraConfirmed = bookingStartingOn(10).id();
+        tools.updateBookingStatus(fraConfirmed, BookingStatus.CONFIRMED);
+
+        long fraPaid = bookingStartingOn(15).id();
+        tools.updateBookingStatus(fraPaid, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(fraPaid, BookingStatus.PAID);
+
+        for (long id : new long[] {fraPending, fraConfirmed, fraPaid}) {
+            assertEquals(BookingStatus.CANCELLED, tools.cancelBooking(id).status());
+            assertEquals(BookingStatus.CANCELLED, tools.getBooking(id).status());
+        }
+    }
+
+    /**
+     * {@code idempotentHint = true} i praksis, og svaret på «hva skjer ved to kanselleringer på
+     * rad?». Det andre kallet <em>feiler</em> — {@code CANCELLED} har et tomt sett med lovlige
+     * overganger, så heller ikke til seg selv — men databasen er bit for bit den samme etterpå.
+     * Hintet lover ingen ytterligere <em>effekt</em>, ikke at kall to svarer det samme.
+     */
+    @Test
+    void cancellingAnAlreadyCancelledBookingIsRejectedButChangesNothing() {
+        long id = bookingStartingOn(5).id();
+        Booking etterFørsteKall = tools.cancelBooking(id);
+
+        assertEquals(
+                "Ulovlig statusovergang: CANCELLED -> CANCELLED",
+                assertThrows(ValidationException.class, () -> tools.cancelBooking(id))
+                        .getMessage());
+        assertEquals(etterFørsteKall, tools.getBooking(id));
+    }
+
+    /** {@code COMPLETED} er den andre endestasjonen: et gjennomført opphold kan ikke avlyses. */
+    @Test
+    void rejectsCancellingACompletedBooking() {
+        long id = bookingStartingOn(5).id();
+        tools.updateBookingStatus(id, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(id, BookingStatus.PAID);
+        tools.updateBookingStatus(id, BookingStatus.COMPLETED);
+
+        assertEquals(
+                "Ulovlig statusovergang: COMPLETED -> CANCELLED",
+                assertThrows(ValidationException.class, () -> tools.cancelBooking(id))
+                        .getMessage());
+        assertEquals(BookingStatus.COMPLETED, tools.getBooking(id).status());
+    }
+
+    /** Ukjent id: samme {@code NotFoundException} som i T-08/T-09, og ingenting endres. */
+    @Test
+    void rejectsCancelForAnUnknownBookingId() {
+        assertEquals(
+                "Fant ingen booking med id 999",
+                assertThrows(NotFoundException.class, () -> tools.cancelBooking(999L))
+                        .getMessage());
+    }
+
+    /**
+     * <b>Akseptkriteriet i T-12:</b> frigjort kapasitet blir tilgjengelig igjen. Kyoto fylles helt
+     * opp, den neste bookingen avvises, kanselleringen gjøres med {@code cancel_booking}, og
+     * <em>nøyaktig samme</em> booking går deretter gjennom. T-11 viste det samme med
+     * {@code update_booking_status}; her er det den dedikerte inngangen som frigjør plassene.
+     */
+    @Test
+    void cancelBookingFreesTheCapacityForTheSameRequest() {
+        long fullBooking = book("Fyller opp", 5, 8, 3).id();
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 2 forespurt",
+                kapasitetsfeil("Kommer for sent", 6, 9, 2));
+
+        tools.cancelBooking(fullBooking);
+
+        Booking slappGjennom = book("Kommer for sent", 6, 9, 2);
+        assertEquals(BookingStatus.PENDING, slappGjennom.status());
+        // Raden er ikke slettet — den ligger igjen som CANCELLED og teller bare ikke lenger med.
+        assertEquals(BookingStatus.CANCELLED, tools.getBooking(fullBooking).status());
+        assertEquals(
+                List.of(fullBooking, slappGjennom.id()), ider(tools.listBookings(null)));
+    }
+
+    /**
+     * Det åpenbare spørsmålet i T-12, pinnet ned: {@code cancel_booking(id)} og
+     * {@code update_booking_status(id, CANCELLED)} er <b>funksjonelt identiske</b>.
+     * {@code BookingService.cancel(id)} er bokstavelig talt {@code updateStatus(id, CANCELLED)},
+     * så to like bookinger kansellert hver sin vei blir like på alt annet enn {@code id}. Det egne
+     * verktøyet finnes for katalogens skyld (ett argument, et navn som treffer brukerens intensjon,
+     * og en hint-blokk hosten kan gate på ved navn) — ikke fordi det gjør noe annet.
+     */
+    @Test
+    void cancelBookingIsTheSameOperationAsUpdatingTheStatusToCancelled() {
+        Booking viaDedikert = tools.cancelBooking(bookingStartingOn(5).id());
+        Booking viaGenerisk =
+                tools.updateBookingStatus(bookingStartingOn(10).id(), BookingStatus.CANCELLED);
+
+        assertEquals(BookingStatus.CANCELLED, viaDedikert.status());
+        assertEquals(viaDedikert.status(), viaGenerisk.status());
+        // Alt annet enn id og datoene (som er valgt ulikt for å unngå kapasitetskonflikt) er likt.
+        assertEquals(viaDedikert.customerName(), viaGenerisk.customerName());
+        assertEquals(viaDedikert.destinationId(), viaGenerisk.destinationId());
+        assertEquals(viaDedikert.numTravelers(), viaGenerisk.numTravelers());
+        assertEquals(viaDedikert.totalPrice(), viaGenerisk.totalPrice());
+    }
 }
