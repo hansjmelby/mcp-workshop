@@ -115,9 +115,11 @@ Lavnivå ved behov: `DestinationRepository`, `AvailabilityRepository`
 
 ## Viktige konvensjoner / fallgruver
 
-- **stdio eier stdout.** I stdio-modus går JSON-RPC over stdout, så **all logging må til
-  fil** (`logging.threshold.console=OFF`, `logging.file.name=…`) og banner er av. Ikke skriv
-  til `System.out` fra verktøykode — det korrumperer protokollen.
+- **stdio eier stdout.** I stdio-modus går JSON-RPC over stdout, så **all logging rutes til
+  stderr + fil** via `logback-spring.xml` (`logs/vacation-booking-mcp.log`). Banneret går
+  gjennom loggeren (`spring.main.banner-mode=log`), så Spring-logoen og oppstartsloggen er
+  synlige i konsollet uten å korrumpere protokollen. Ikke skriv til `System.out` fra
+  verktøykode — bruk en logger.
 - **Databasen** opprettes og seedes ved oppstart fra `src/main/resources/schema.sql` +
   `data.sql` (`spring.sql.init.mode=always`). Fila `vacation.db` ligger i prosjektroten og
   er git-ignorert; slett den for å nullstille. Skjemaet er idempotent (`IF NOT EXISTS`).
@@ -142,6 +144,7 @@ src/main/java/no/computas/vacationmcp/
   config/RegisteredToolsLogger.java  # logger registrerte tools ved oppstart
 src/main/resources/
   application.properties             # MCP stdio + SQLite-config
+  logback-spring.xml                 # logging til stderr + fil (holder stdout rent)
   schema.sql / data.sql              # ferie-booking-skjema + seed
 src/test/java/.../service/           # tester for forretningslaget
 BACKLOG.md                           # workshop-oppgavene
