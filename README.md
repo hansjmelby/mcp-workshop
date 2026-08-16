@@ -256,7 +256,8 @@ Eksempel på det enkleste verktøyet finnes i
 annotasjoner finnes for ressurser (`@McpResource`) og prompts (`@McpPrompt`).
 
 > **Viktig (stdio):** Protokollen eier `stdout`. Ikke skriv til `System.out` fra
-> verktøykode — bruk en logger (logg går til stderr + fil). Ellers korrumperes JSON-RPC-en.
+> verktøykode — bruk en logger (logg går til stderr + fil, se
+> [Hvor finner jeg loggen?](#hvor-finner-jeg-loggen)). Ellers korrumperes JSON-RPC-en.
 
 ---
 
@@ -284,10 +285,36 @@ BACKLOG.md                             # workshop-oppgavene
 Alt arbeidet er beskrevet i **[BACKLOG.md](BACKLOG.md)**, gruppert i epics fra «kom i gang»
 til remote HTTP-transport. Ta oppgavene i rekkefølge.
 
+## Hvor finner jeg loggen?
+
+Fordi protokollen eier `stdout`, går **all logg til `stderr` + fil**. Terminalen tegner begge
+strømmene i samme vindu, så de *ser* ut som én — men de er separate, og det er nettopp derfor
+stdio-serveren virker. Vil du se dem hver for seg, kast den andre:
+
+```bash
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > /dev/null   # kun loggen (stderr)
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar 2>/dev/null   # kun JSON-RPC (stdout)
+```
+
+Den andre kommandoen viser hva en MCP-klient faktisk mottar: ingenting annet enn protokollen.
+
+**Loggfila er det mest praktiske under workshopen** — den skrives uansett hvem som startet
+serveren. La den stå åpen i et eget terminalvindu:
+
+```bash
+tail -f logs/vacation-booking-mcp.log
+```
+
+Dette blir viktig fra og med **T-02**: når Claude Desktop starter jar-en som subprosess, har du
+ingen terminal å se i, og loggen er det eneste som forklarer hvorfor et verktøy feilet.
+
+- **MCP Inspector** viser serverens stderr i panelet «Error output from MCP server».
+- **Claude Desktop (macOS)** skriver den til `~/Library/Logs/Claude/mcp-server-vacation-booking.log`.
+
 ## Feilsøking
 
-- **«Appen henger» / ingen output:** Forventet — stdio-serveren venter på en klient. Logg
-  går til konsollet (stderr) og til `logs/vacation-booking-mcp.log`.
+- **«Appen henger» / ingen output:** Forventet — stdio-serveren venter på en klient. Se
+  [Hvor finner jeg loggen?](#hvor-finner-jeg-loggen) for å følge med på hva den gjør.
 - **`WARN … BeanPostProcessorChecker` ved oppstart:** Ufarlig. Kommer fra Spring AI sin egen
   autokonfigurasjon av annotasjons-scanneren, ikke fra din kode. Serveren starter normalt.
 - **Inspector «connection error»:** Bruk den tokeniserte URL-en, og kjør fra prosjektroten.
