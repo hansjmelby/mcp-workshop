@@ -27,7 +27,7 @@ etterpå. Én commit per oppgave.
 | T-14 | Bookinger som Resource | ✅ | `resources/BookingResources.java` med **én** `@McpResource`: malen `booking://{id}` (`resources/templates/list`). **Bevisst ingen liste-ressurs** — bookinger er transaksjonsdata som endres midt i samtalen, og en foreldet liste rått i konteksten er verre enn ingen; `list_bookings` dekker behovet. Innholdet slår opp reisemålsnavnet og gjengir lovlige statusoverganger fra `BookingStatus.canTransitionTo`; `booking://1` gir nå innhold i stedet for SDK-ens `-32002`; test `resources/BookingResourcesTest.java` med 10 tester ([se under](#t-14--bookinger-som-resource)) |
 | T-15 | Prompts | ✅ | Ny pakke `prompts/` → `prompts/VacationPrompts.java` med **to** `@McpPrompt`: `plan_vacation_within_budget` (en **arbeidsflyt uttrykt som tekst** — fem argumenter, to obligatoriske, som skriver ut rekkefølgen T-03→T-07 skal kalles i) og `travel_summary` (instruksjon + bookingen **vedlagt** som `EmbeddedResource` med innhold gjenbrukt fra `booking://{id}`). Tredje og siste primitiv: **brukerstyrt** (menyvalg/slash-kommando), mot modellstyrte verktøy og applikasjonsstyrte ressurser. Empirisk verifisert at prompt-argumenter er en flat liste uten `inputSchema` (`@McpArg`, ikke `@McpToolParam`), at `required` **ikke håndheves av noen**, og at en `String`-returverdi gir rollen `assistant`; test `prompts/VacationPromptsTest.java` med 14 tester ([se under](#t-15--prompts)) |
 | T-16 | `bookings_report` | ✅ | Ny verktøyklasse `tools/ReportTools.java` → `bookings_report` (tre valgfrie parametere), og — **den ene oppgaven med ny kode i tjenestelaget** — `service/ReportingService.java` + `service/BookingsReport.java`. Aggregeringen ble lagt i Java over eksisterende repository-metoder, ikke i ny SQL; **ingen** repository-metode er endret eller lagt til. Definisjonene: **omsetning** = `totalPrice` for alt unntatt `CANCELLED` (`PENDING` er med, men skilles ut i `pendingRevenue`; kansellert rapporteres for seg), **belegg** = plassdøgn `bookedNights / capacityNights` per `availability`-rad, med T-11s kapasitetskartlegging som premiss. Test `tools/ReportToolsTest.java` med 14 tester ([se under](#t-16--bookings_report)). **Epic 6 ferdig.** |
-| T-17 | Streamable HTTP-transport | ⬜ | — |
+| T-17 | Streamable HTTP-transport | ✅ | **Ingen Java-kode** — kun bygg og konfigurasjon. `spring-ai-starter-mcp-server-webmvc` lagt til *ved siden av* stdio-starteren, og transporten slås om med Spring-profilen `http` (ny fil `src/main/resources/application-http.properties`). Uten profil: uendret stdio-server, ingen Tomcat (`spring.main.web-application-type=none`). Med profil: Streamable HTTP på `POST http://localhost:8080/mcp`. `logback-spring.xml` bytter konsoll-appenderen fra stderr til **stdout** i `http`-profilen, siden protokollen ikke eier stdout lenger. Begge transportene verifisert gjennom protokollen; alle 135 tester uendret grønne ([se under](#t-17--streamable-http-transport)) |
 | T-18 | Bearer-token-auth | ⬜ | — |
 | T-19 | Koble Claude til remote-serveren | ⬜ | — |
 | T-20 | Elicitation (bonus) | ⬜ | — |
@@ -2931,3 +2931,229 @@ grense.
 | Omsetningen «forsvinner» etter en kansellering | `CANCELLED` er ute av `revenue` etter definisjonen | Tallet står i `cancelledRevenue` |
 | Omsetning + kansellert gir feil sum | `cancelledRevenue` ligger *utenfor* `revenue` | Ikke legg dem sammen; `pendingRevenue` er derimot en delmengde av `revenue` |
 | Sum av `periods[].revenue` < reisemålets `revenue` | En booking dekkes ikke av noen enkelt `availability`-rad (kan bare skje ved skriving utenom `create_booking`) | Reisemålslinja er fasiten; periodelinjene fordeler det som lar seg fordele |
+
+### T-17 · Streamable HTTP-transport
+
+**Ingen Java-kode.** Hele oppgaven er bygg + konfigurasjon:
+
+| Fil | Endring |
+|-----|---------|
+| `build.gradle.kts` | `spring-ai-starter-mcp-server-webmvc` lagt til **ved siden av** `spring-ai-starter-mcp-server` |
+| `src/main/resources/application.properties` | ny linje `spring.main.web-application-type=none` (holder Tomcat nede i stdio-modus) |
+| `src/main/resources/application-http.properties` | **ny** — alt som er spesifikt for `http`-profilen |
+| `src/main/resources/logback-spring.xml` | konsoll-appenderen defineres per profil: stderr uten `http`, stdout med |
+| `src/test/resources/application.properties` | `spring.main.web-application-type=none` gjentatt (testfila skygger for hovedfila) |
+
+#### Hvorfor «bytt» ble til «legg bak en profil»
+
+Backloggen sier *bytt* fra stdio til HTTP. På fasit-branchen kan vi ikke gjøre det bokstavelig:
+T-01 (Inspector mot jar-en), T-02 (`claude mcp add-json … java -jar …`) og hele README-oppskriften
+forutsetter en stdio-server. Løsningen er den som allerede er avtalt øverst i denne fila —
+Spring-profilen `http`:
+
+```bash
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar                          # stdio, som før
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar --spring.profiles.active=http   # HTTP på :8080
+```
+
+#### Kan de to starterne ligge på klassestien samtidig? Ja — og det er ikke tilfeldig
+
+`spring-ai-starter-mcp-server-webmvc` drar inn `spring-boot-starter-web` (Tomcat). Det er to
+uavhengige spørsmål: (a) starter Spring AI en HTTP-transport, og (b) starter Spring Boot en
+webserver. Begge må svares på hver for seg.
+
+**(a) MCP-transporten.** Alle tre webmvc-autokonfigurasjonene i Spring AI 2.0.0 —
+`McpServerStreamableHttpWebMvcAutoConfiguration`, `McpServerSseWebMvcAutoConfiguration`,
+`McpServerStatelessWebMvcAutoConfiguration` — er annotert med
+`@Conditional({McpServerStdioDisabledCondition.class, …})`. Den betingelsen krever
+`spring.ai.mcp.server.stdio=false`. Med `stdio=true` i hovedfila trekker de seg altså **helt**
+tilbake, og `McpServerAutoConfiguration.stdioServerTransport(...)` — som er
+`@ConditionalOnMissingBean` på `McpServerTransportProviderBase` — står igjen som eneste transport.
+Motsatt vei er `@AutoConfiguration(before = McpServerAutoConfiguration.class)` det som sikrer at
+webmvc-provideren registreres *først*, så stdio-beanen backer av. Rekkefølgen er eksplisitt i
+Spring AI, ikke noe vi må stole på flaks for.
+
+**(b) Webserveren.** Denne er *ikke* dekket av punkt (a). Spring Boot utleder
+`WebApplicationType` fra klassestien, og med `spring-boot-starter-web` der ville jar-en startet
+Tomcat og bundet port 8080 — også i stdio-modus. Derfor `spring.main.web-application-type=none` i
+`application.properties`, som `application-http.properties` setter tilbake til `servlet`.
+Verifisert: stdio-kjøringen har null treff på «tomcat» eller «servlet» i stderr.
+
+**Testene.** `src/test/resources/application.properties` **skygger** for hovedfila (samme
+ressursnavn, testressursene kommer først på klassestien) — `none` fra hovedfila gjelder altså ikke
+i test, og linja måtte gjentas der. Alle 135 tester er uendret grønne, ingen webserver i
+testkonteksten.
+
+#### `application-http.properties`
+
+```properties
+spring.ai.mcp.server.stdio=false        # nøkkelen: skrur på webmvc-autokonfigurasjonene
+spring.ai.mcp.server.protocol=STREAMABLE
+spring.main.web-application-type=servlet
+server.port=8080
+spring.main.banner-mode=console
+```
+
+**Fella i `protocol`:** feltet i `McpServerProperties` har `STREAMABLE` som default-verdi i Java,
+men `@ConditionalOnProperty(name = "protocol", havingValue = "STREAMABLE", matchIfMissing = false)`
+leser **miljøet**, ikke den bundne beanen. Står ikke linja der, matcher i stedet
+`EnabledSseServerCondition` (`havingValue = "SSE", matchIfMissing = true`) og du får den
+deprecated SSE-transporten på `/sse` + `/mcp/message`. Linja er altså obligatorisk, ikke kosmetikk.
+
+**Logging.** `logback-spring.xml` definerer appenderen `CONSOLE` inne i `<springProfile>`-blokker:
+`System.err` uten `http`-profilen, `System.out` med. I stdio-modus *må* stdout være rent, for der
+går JSON-RPC. I HTTP-modus går JSON-RPC over HTTP-body-en, stdout er ledig, og da hører serverloggen
+hjemme der — det er stdout `docker logs`, `kubectl logs` og de fleste prosessovervåkere leser først.
+Appenderen defineres inne i profilblokken, ikke utenfor: definerer man begge to globalt, klager
+logback ved oppstart med `Appender named [STDOUT] not referenced` — unødig støy i et repo som
+allerede dokumenterer sine ufarlige WARN-er.
+
+#### Endepunktet — verifisert, ikke gjettet
+
+`McpServerStreamableHttpProperties.mcpEndpoint` har defaulten `/mcp` (overstyres med
+`spring.ai.mcp.server.streamable-http.mcp-endpoint`). Med `server.port=8080` blir adressen:
+
+```
+POST/GET/DELETE  http://localhost:8080/mcp
+```
+
+#### Den fungerende `curl`-sekvensen
+
+Serveren startet med `--spring.profiles.active=http`. Alt under er faktisk kjørt.
+
+```bash
+# 1) initialize — sesjons-id-en ligger i responsHEADEREN, ikke i JSON-en
+SID=$(curl -sS -D - -o /dev/null -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | tr -d '\r' | sed -n 's/^Mcp-Session-Id: //p')
+
+# 2) notifications/initialized — ingen id, ingen respons → 202 Accepted
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3) tools/list — svaret er SSE; sed-en plukker ut JSON-en
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | sed -n 's/^data://p'
+
+# 4) tools/call
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_destinations","arguments":{"country":"Norge"}}}' \
+  | sed -n 's/^data://p'
+
+# 5) avslutt sesjonen
+curl -sS -X DELETE http://localhost:8080/mcp -H "Mcp-Session-Id: $SID"
+```
+
+Faktiske svar:
+
+```jsonc
+// 1) HTTP/1.1 200 · Mcp-Session-Id: 905e85b5-b5bd-475c-842a-481cfbc1870b · Content-Type: application/json
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"completions":{},"logging":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true}},"serverInfo":{"name":"vacation-booking-mcp","version":"0.0.1"}}}
+
+// 2) HTTP/1.1 202 · tom body
+
+// 3) HTTP/1.1 200 · Content-Type: text/event-stream · Transfer-Encoding: chunked
+//    id:905e85b5-… / event:message / data:{…}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"about_application", … ,{"name":"bookings_report", …}]}}
+// → alle 11 verktøy, identisk katalog som over stdio
+
+// 4)
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[{\"id\":1,\"name\":\"Lofoten Rorbuer\",\"country\":\"Norge\",…},{\"id\":5,\"name\":\"Tromsø Nordlys-lodge\",…}]"}],"isError":false}}
+
+// 5) HTTP/1.1 200 — og et nytt kall med samme id gir {"code":-32603,"message":"Session not found: 905e85b5-…"}
+```
+
+`prompts/list`, `resources/list` og `resources/templates/list` ble kjørt i samme økt og ga
+nøyaktig samme innhold som over stdio: `[travel_summary, plan_vacation_within_budget]`,
+`[destination://catalog]`, `[destination://{id}, booking://{id}]`. **Primitivene er
+transportuavhengige** — det er hele poenget med å bytte transport: ingen `@McpTool`,
+`@McpResource` eller `@McpPrompt` ble rørt.
+
+#### Forskjellene mellom de to transportene
+
+| | stdio (default) | Streamable HTTP (`http`-profil) |
+|---|---|---|
+| Hvem starter prosessen | **Hosten** (Claude/Inspector), én prosess per klient | **Du**, én prosess for alle klienter |
+| Adressering | prosess-stdin/stdout | `http://localhost:8080/mcp` |
+| Sesjon | implisitt = prosessens levetid | eksplisitt `Mcp-Session-Id`-header, avsluttes med `DELETE` |
+| Svarformat | én JSON-linje per respons | `initialize` → `application/json`; deretter `text/event-stream` (`event:message` + `data:{…}`) |
+| `Accept`-krav | — | **må** inneholde `application/json, text/event-stream` (ellers `400`) |
+| stdout | eid av protokollen — all logg til stderr | ledig — logg til stdout |
+| Samtidige klienter | én | mange, hver med sin sesjons-id |
+| Autentisering | arves fra prosessen som startet den | finnes ikke ennå → **T-18** |
+
+To ting som overrasker første gang:
+
+1. **Svaret på `initialize` er rå JSON, resten er SSE.** Sesjonen finnes ikke før håndtrykket, så
+   den første responsen kan ikke gå på en sesjonsstrøm. Etterpå svarer transporten på
+   `text/event-stream`, og `curl` viser `id:`/`event:message`/`data:`-linjer. En ekte MCP-klient
+   skjuler dette; `curl` gjør det ikke, derav `sed -n 's/^data://p'`.
+2. **Sesjons-id-en er en header, ikke et JSON-felt.** Derfor `-D -` på det første kallet. Glemmer du
+   headeren i et senere kall får du `{"code":-32601,"message":"Session ID missing"}`; sender du en
+   ukjent id får du `-32603 Session not found: …`. Merk at begge kommer som en Jackson-serialisert
+   `McpError` med `stackTrace` og alt — det er SDK-ens feilrespons på transportnivå, ikke vår.
+
+#### Hvis man vil gå «helt over» til HTTP
+
+Fasiten beholder begge, men skal man droppe stdio for godt er dette listen:
+
+1. **`build.gradle.kts`:** fjern `spring-ai-starter-mcp-server` og behold bare `…-webmvc`.
+   Webmvc-starteren trekker inn `spring-ai-autoconfigure-mcp-server-webmvc` (som selv avhenger av
+   `…-common`), `spring-ai-mcp` og `spring-ai-mcp-annotations` — annotasjons-scanneren og alle
+   `@McpTool`/`@McpResource`/`@McpPrompt` overlever uendret.
+2. **`application.properties`:** flytt innholdet fra `application-http.properties` inn, og slett
+   `spring.ai.mcp.server.stdio=true`, `spring.main.banner-mode=log` og
+   `spring.main.web-application-type=none`. Slett så profil-fila.
+3. **`logback-spring.xml`:** dropp `<springProfile>`-blokkene og la `CONSOLE` peke på `System.out`.
+   Hele stderr-begrunnelsen forsvinner med stdio.
+4. **`src/test/resources/application.properties`:** `spring.main.web-application-type=none` kan bli
+   stående (testene trenger ingen webserver), men `spring.ai.mcp.server.stdio=false` blir
+   overflødig.
+5. **README/CLAUDE.md:** røyktesten med `printf | java -jar` slutter å virke — erstatt med
+   `curl`-sekvensen over. `claude mcp add-json` må bli `claude mcp add --transport http …`, og
+   Inspector kobles til med transporttypen *Streamable HTTP* + URL i stedet for en kommando.
+6. **Databasen:** `vacation.db` er en fil i arbeidskatalogen. Med stdio startet hosten prosessen
+   fra sin egen katalog; med én stå-alene HTTP-prosess er stien forutsigbar, men til gjengjeld deler
+   nå *alle* klienter samme database. Det er greit i en workshop, verdt en tanke ellers.
+7. **Autentisering blir obligatorisk.** En stdio-server er like utsatt som prosessen som startet
+   den. Et åpent HTTP-endepunkt på 8080 kan alle på maskinen — og med feil brannmur, på nettet —
+   kalle `create_booking` mot. Det er nettopp det T-18 handler om.
+
+#### Verifisering
+
+**1. `./gradlew build` grønt** — 135 tester, 0 feil, uendret fra T-16. Ingen webserver i
+testkonteksten, og ingen logback-WARN om ubrukt appender.
+
+**2. stdio-regresjon** — røyktesten fra CLAUDE.md kjørt på nytt mot den nye jar-en. Stdout ga
+**nøyaktig to** rene JSON-linjer (svar på `initialize` og `tools/list`, med alle 11 verktøy), og
+stderr hadde **null** treff på «tomcat»/«servlet». Transporten er altså bit for bit den samme som
+før T-17.
+
+**3. HTTP** — hele økten over, kjørt mot en bakgrunnsprosess med `http`-profilen. Loggen bekreftet
+`Tomcat started on port 8080 (http)`, `The following 1 profile is active: "http"` og
+`Registered tools: 11 / resources: 1 / resource templates: 2`. Prosessen ble stoppet etterpå;
+port 8080 er ledig og ingen java-prosess henger igjen.
+
+> Alle kall i HTTP-økten var lesende (`list_destinations`, `search_destinations`,
+> `about_application`, `prompts/list`, `resources/list`), men `vacation.db` ble kopiert før
+> kjøringen og lagt tilbake etterpå uansett. Hjelpefiler lå i en scratchpad-katalog utenfor repoet.
+
+#### Fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| `400 Bad Request` på alle kall | `Accept` mangler `text/event-stream` | `-H 'Accept: application/json, text/event-stream'` |
+| `{"code":-32601,"message":"Session ID missing"}` | `Mcp-Session-Id`-headeren er ikke med | Plukk den fra `initialize`-responsen (`-D -`) og send den i alle senere kall |
+| `-32603 Session not found: …` | Sesjonen er avsluttet (`DELETE`) eller serveren restartet | Kjør `initialize` på nytt |
+| Endepunktet svarer `404` | Serveren kjører uten `http`-profilen — eller på `/sse` fordi `protocol` mangler | `--spring.profiles.active=http`, og sjekk at `spring.ai.mcp.server.protocol=STREAMABLE` er satt |
+| Tomcat starter i stdio-modus og «spiser» port 8080 | `spring.main.web-application-type=none` mangler | Linja hører hjemme i `application.properties`, og må gjentas i testressursene |
+| Svaret ser ut som søppel (`id:…`, `event:message`) | Det *er* SSE, ikke en feil | `| sed -n 's/^data://p'` |
+| JSON-RPC-linjer forsvinner i loggen i stdio-modus | Konsoll-appenderen er byttet til stdout | `<springProfile name="http">` styrer dette — sjekk at profilen ikke er aktiv ved en feil |

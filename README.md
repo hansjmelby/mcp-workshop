@@ -185,6 +185,70 @@ Spør deretter Claude: «hva er denne applikasjonen?» — den skal bruke verkt�
   og tilkoblingen faller ut. Bygg ferdig først, og koble så til igjen: `/mcp` i Claude Code,
   eller restart av Claude Desktop.
 
+### Kjør serveren over HTTP i stedet (Streamable HTTP)
+
+Samme jar, samme verktøy — men som en vanlig webtjeneste i stedet for en prosess hosten
+starter. Slås på med Spring-profilen **`http`**:
+
+```bash
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar --spring.profiles.active=http
+# eller: SPRING_PROFILES_ACTIVE=http java -jar build/libs/…jar
+# (PowerShell: $env:SPRING_PROFILES_ACTIVE="http"; java -jar build\libs\…jar)
+```
+
+Endepunktet er **`http://localhost:8080/mcp`**. Uten profilen er serveren nøyaktig som før —
+en stdio-server som ikke starter noen webserver. Alt som er profilspesifikt ligger i
+[`application-http.properties`](src/main/resources/application-http.properties).
+
+To ting skiller en Streamable HTTP-klient fra en stdio-klient, og begge er lette å gå på:
+
+1. **`Accept` må inneholde *begge* typene** — `application/json, text/event-stream`. Sender du
+   bare `application/json`, svarer serveren `400`.
+2. **Sesjons-id-en fra `initialize` må sendes med videre.** Svaret på `initialize` har headeren
+   `Mcp-Session-Id: <uuid>`; alle senere kall må ha den samme headeren tilbake. Uten den får du
+   `Session ID missing`.
+
+En hel MCP-økt med `curl` (bash — Git Bash/WSL på Windows):
+
+```bash
+# 1) initialize — plukk sesjons-id-en ut av responsheaderne
+SID=$(curl -sS -D - -o /dev/null -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | tr -d '\r' | sed -n 's/^Mcp-Session-Id: //p')
+
+# 2) notifications/initialized — ingen id, ingen respons (svarer 202 Accepted)
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3) tools/list — svaret kommer som SSE; `sed -n 's/^data://p'` plukker ut JSON-en
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | sed -n 's/^data://p'
+
+# 4) tools/call
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_destinations","arguments":{"country":"Norge"}}}' \
+  | sed -n 's/^data://p'
+
+# 5) avslutt sesjonen (valgfritt)
+curl -sS -X DELETE http://localhost:8080/mcp -H "Mcp-Session-Id: $SID"
+```
+
+> **Merk formatet:** svaret på `initialize` er rå `application/json`, mens svarene *etter*
+> håndtrykket kommer som `text/event-stream` (`event:message` + `data:{…}`). Det er derfor
+> `sed`-en står der.
+
+I HTTP-modus eier ikke protokollen stdout lenger — JSON-RPC går over HTTP-body-en. Derfor
+logger serveren til **stdout** i denne profilen (og fortsatt til
+`logs/vacation-booking-mcp.log`), i motsetning til stdio-modus der alt må til stderr.
+
 ---
 
 ## Arkitektur

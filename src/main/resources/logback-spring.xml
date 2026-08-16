@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  I stdio-modus eier MCP-protokollen stdout (JSON-RPC). Vi logger derfor til stderr,
+  I stdio-modus (default) eier MCP-protokollen stdout (JSON-RPC). Vi logger derfor til stderr,
   som er ledig og synlig i IntelliJ/konsollet, samt til fil. Dermed ser du Spring-logoen
   og oppstartsloggen uten å korrumpere meldingene til klienten.
+
+  I profilen `http` (T-17) går JSON-RPC over HTTP i stedet, og stdout er ledig. Da logger vi
+  til stdout — det er det vanlige stedet en serverlogg havner, og `docker logs`, `kubectl logs`
+  og de fleste prosessovervåkere leser stdout først.
 -->
 <configuration>
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
@@ -10,16 +14,30 @@
     <property name="LOG_FILE" value="logs/vacation-booking-mcp.log"/>
     <include resource="org/springframework/boot/logging/logback/file-appender.xml"/>
 
-    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
-        <target>System.err</target>
-        <encoder>
-            <pattern>${CONSOLE_LOG_PATTERN}</pattern>
-            <charset>${CONSOLE_LOG_CHARSET}</charset>
-        </encoder>
-    </appender>
+    <!-- Appenderen defineres inne i profilblokken. Definerer man begge to utenfor, klager
+         logback ved oppstart om at den ubrukte er «not referenced» — unødig støy i konsollet. -->
+    <springProfile name="!http">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <target>System.err</target>
+            <encoder>
+                <pattern>${CONSOLE_LOG_PATTERN}</pattern>
+                <charset>${CONSOLE_LOG_CHARSET}</charset>
+            </encoder>
+        </appender>
+    </springProfile>
+
+    <springProfile name="http">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <target>System.out</target>
+            <encoder>
+                <pattern>${CONSOLE_LOG_PATTERN}</pattern>
+                <charset>${CONSOLE_LOG_CHARSET}</charset>
+            </encoder>
+        </appender>
+    </springProfile>
 
     <root level="INFO">
-        <appender-ref ref="STDERR"/>
+        <appender-ref ref="CONSOLE"/>
         <appender-ref ref="FILE"/>
     </root>
 </configuration>
