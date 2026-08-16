@@ -20,7 +20,7 @@ etterpå. Én commit per oppgave.
 | T-07 | `create_booking` | ✅ | `tools/BookingTools.java` → verktøyet `create_booking` (første **skrivende** verktøy — egne `annotations`; fem obligatoriske parametere; `Booking` returneres uendret); test `tools/BookingToolsTest.java` med 10 tester ([se under](#t-07--create_booking)) |
 | T-08 | `get_booking` | ✅ | `get_booking` lagt til i `tools/BookingTools.java` (første **lesende** verktøy i en blandet klasse — egne hint per metode; én obligatorisk `long id`; `Booking` returneres uendret); 4 nye tester i `tools/BookingToolsTest.java` ([se under](#t-08--get_booking)) |
 | T-09 | `update_booking_status` | ✅ | `update_booking_status` lagt til i `tools/BookingTools.java` (første **enum** over MCP-grensen — `BookingStatus` gir `"enum":[…]` i skjemaet, og ugyldige verdier stoppes av skjemavalideringen; første verktøy med `destructiveHint = true` + `idempotentHint = true`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-09--update_booking_status)) |
-| T-10 | `list_bookings` | ⬜ | — |
+| T-10 | `list_bookings` | ✅ | `list_bookings` lagt til i `tools/BookingTools.java` (første **valgfrie enum** — `"enum":[…]` i skjemaet *og* tomt `required`; bar `List<Booking>` som svar, ingen konvolutt; krysshenvisning begge veier mot `get_booking`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-10--list_bookings)) |
 | T-11 | Avvis overbooking | ⬜ | — |
 | T-12 | `cancel_booking` | ⬜ | — |
 | T-13 | Destinasjoner som Resource | ⬜ | — |
@@ -51,7 +51,8 @@ etterpå. Én commit per oppgave.
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
   `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
-  `BookingTools` (T-07 ✅, T-08–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
+  `BookingTools` (T-07 ✅, T-08 ✅, T-09 ✅, T-10 ✅, T-11–T-12). `AboutTool` (entall) står igjen som
+  eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
 - **Metodenavnet er camelCase av verktøynavnet** (`list_destinations` → `listDestinations`),
@@ -79,7 +80,9 @@ etterpå. Én commit per oppgave.
   `list_destinations` og `search_destinations` peker på hverandre).
 - **Valgfrie parametere må merkes eksplisitt** med `@McpToolParam(required = false, …)`, og
   Java-typen må være bokset (`Double`/`Integer`/`Long`) der `null` skal bety «ikke oppgitt».
-  Se T-04 for den faktiske `inputSchema`-en dette gir.
+  Se T-04 for den faktiske `inputSchema`-en dette gir. Referansetyper (`String`, `LocalDate`,
+  enum-er) er allerede «boksede» og trenger ingenting utover `required = false` — se
+  [T-10](#t-10--list_bookings) for kombinasjonen valgfri + enum.
 
 ### Datoer over MCP-grensen (avgjort i T-05 — følg denne)
 
@@ -123,7 +126,8 @@ Konsekvensene å kjenne til:
 ### Enum-er over MCP-grensen (avgjort i T-09 — følg denne)
 
 **Bruk enum-typen (`BookingStatus`) som parametertype, ikke `String`.** Gjelder T-09 ✅ og
-videre T-10 (`list_bookings(status?)`), som tar samme enum.
+T-10 ✅ (`list_bookings(status?)`), som tar samme enum — der *valgfritt*, se
+[T-10-seksjonen](#t-10--list_bookings) for hvordan `enum` og et tomt `required` ser ut sammen.
 
 Verifisert empirisk mot den ekte JSON-en (se [T-09-seksjonen](#t-09--update_booking_status)):
 Spring AI legger **konstantnavnene inn i skjemaet** som en `enum`-liste, og — til forskjell fra
@@ -1472,3 +1476,160 @@ finnes ingen kvittering å konstruere.
 verktøyet peker motsatt vei: slå opp bookingen med `get_booking` først for å se hvilken status den
 faktisk står i, og bruk den samme etter et tvilsomt retry. `list_bookings` (T-10) er med vilje
 ikke nevnt ennå — den finnes ikke i `tools/list` før den oppgaven lander.
+
+### T-10 · `list_bookings`
+
+Fjerde verktøy i `BookingTools`, og det første med en **valgfri enum-parameter** — altså T-04
+(`required = false`) og T-09 (enum-typen over grensen) i samme delskjema. Ingen nye filer:
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | nytt `@McpTool(name = "list_bookings")` → `BookingService.list(status)`; `get_booking` fikk den utsatte krysshenvisningen fra T-08 |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | 7 nye tester (uten filter, hver relevante status, de to terminale, filter uten treff, tom database, at nyopprettede dukker opp, gjentatt kall) |
+
+Metodekroppen er igjen **én linje**: `return bookings.list(status);`. `BookingService.list(...)`
+velger selv mellom `findAll()` og `findByStatus(...)` på `null`, og repository-et sorterer på
+`id` — verktøyet filtrerer, sorterer og pakker ingenting.
+
+#### Skjemaet: `enum`-lista **og** et tomt `required`
+
+Den faktiske `inputSchema`-en fra `tools/list` mot den nybygde jar-en:
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["PENDING", "CONFIRMED", "PAID", "COMPLETED", "CANCELLED"],
+      "description": "Valgfritt statusfilter. **Utelat parameteren** for å få alle bookinger — ikke finn på en verdi for å «fylle den ut». Oppgir du den, må det være én av de fem verdiene i skjemaet …"
+    }
+  },
+  "required": []
+}
+```
+
+Dette er den interessante kombinasjonen, og de to halvdelene er uavhengige:
+
+- **`enum`-lista kommer av typen** (T-09). Den er der uansett om parameteren er obligatorisk
+  eller ikke — `required` og `enum` er to forskjellige nøkkelord i JSON Schema, og det ene sier
+  *om* feltet må være med, det andre *hvilke verdier* det kan ha hvis det er med.
+- **Tomt `required` kommer av `@McpToolParam(required = false)`** (T-04). Uten den ville
+  `status` stått i lista, siden Spring AI har `PROPERTY_REQUIRED_BY_DEFAULT = true` — og en
+  modell som bare ville se *alle* bookinger måtte oppgitt en av de fem verdiene og dermed
+  filtrert bort resten. Nøyaktig samme felle som i T-04, bare mer skadelig her, fordi enum-et
+  ikke har noen «nøytral» verdi å velge.
+
+Til sammen: modellen kan utelate argumentet helt, men *oppgir* den det, håndhever validatoren at
+verdien er en av de fem. Verifisert med begge halvdelene gjennom protokollen — `{}` går gjennom
+(og gir alle), mens `{"status":"BANANA"}` **og** `{"status":"pending"}` (små bokstaver — `enum` er
+case-sensitiv) stoppes av skjemavalideringen, før metoden:
+
+```jsonc
+{"content":[{"type":"text","text":"Tool (list_bookings) input validation failed: Validation failed: JSON schema validation errors: [/status: har ikke en verdi i oppregningen [\"PENDING\", \"CONFIRMED\", \"PAID\", \"COMPLETED\", \"CANCELLED\"]]"}],"isError":true}
+```
+
+**Ingen boksing å tenke på.** T-04 måtte bruke `Double` framfor `double` for at «ikke oppgitt»
+skulle overleve som `null`. Et enum er en referansetype, så det problemet finnes ikke: `null`
+kommer rett inn i `BookingService.list(...)`, som er skrevet for nettopp det. Regelen fra
+«Struktur for verktøyklasser» gjelder altså bare primitiver.
+
+#### Svarformen: en bar `List<Booking>`, ikke en konvolutt
+
+Dette er det bevisste valget oppgaven ber om, og svaret er **bar liste** — T-03-konvensjonen,
+som `list_destinations` og `search_destinations` også følger. T-05 sin `AvailabilityResult`
+er unntaket som ble laget for et konkret problem, og det problemet finnes ikke her:
+
+| T-05 sin begrunnelse | Gjelder for `list_bookings`? |
+|----------------------|------------------------------|
+| En **ukjent id** gir stille tomt svar, umulig å skille fra «ingenting ledig» | Nei — den eneste parameteren er et enum validatoren allerede har godkjent. Det finnes ingen «ugyldig men taus» input |
+| Spørringen har **ikke-åpenbar semantikk** (overlapp ≠ dekket), så ekkoet hjelper modellen | Nei — «bookinger med status X, sortert på id» er akkurat det det ser ut som |
+| Modellen trenger å se **hva den faktisk spurte om** | Nei — `status` er verdien modellen selv sendte i samme kall, ikke noe serveren utledet |
+
+Det som blir igjen av T-05-argumentet, er at et bart `[]` kan leses som en feil. Den risikoen er
+reell, men den løses billigere i `description` enn med en konvolutt som dupliserer inputen:
+beskrivelsen sier ordrett at «en **tom liste er et gyldig svar**, ikke en feil», hva den betyr
+(ingen bookinger med den statusen — eller ingen bookinger i det hele tatt), og hva modellen skal
+gjøre (si det til brukeren, eventuelt prøve uten filter). Et `matchingBookings`-felt hadde
+dessuten vært ren duplisering: en liste kan telles, mens `matchingPeriods` i T-05 sto sammen med
+et ekko som faktisk bar ny informasjon.
+
+Konsekvensen er at svaret er identisk i form med `list_destinations` — et JSON-array av
+domene-records, ingen mapping, ingen DTO. Legges det til et felt i `Booking`, er det med.
+
+#### Krysshenvisningen begge veier (den T-08 utsatte)
+
+T-08 lot med vilje være å nevne `list_bookings` i `get_booking`, fordi verktøyet ikke fantes i
+`tools/list` ennå og en modell ikke skal ledes mot et kall som ikke eksisterer. Nå er begge
+retningene på plass:
+
+- **`get_booking` → `list_bookings`:** «Kjenner du ikke id-en, kall `list_bookings` og finn
+  bookingen i lista, eller spør brukeren om referansen — ikke prøv deg fram med flere id-er her.»
+  (Erstatter den forrige formuleringen, som bare hadde «spør brukeren».)
+- **`list_bookings` → `get_booking`:** «Har du allerede id-en, bruk `get_booking` i stedet; det er
+  ett oppslag i stedet for hele lista.»
+
+Beskrivelsen peker også videre til `create_booking` og `update_booking_status`, og forklarer at
+`destinationId` er en id som må slås opp med `list_destinations` for å bli et navn — samme
+presisering som i `get_booking`. Én ting til som ellers ville blitt gjettet feil: **kansellerte
+bookinger blir liggende** i lista med status `CANCELLED`; de forsvinner ikke, men teller ikke
+lenger mot kapasiteten.
+
+#### `annotations`: lesende, per metode
+
+```jsonc
+"annotations": {"title":"List bookinger","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+```
+
+Identisk med `get_booking` (T-08) og de lesende verktøyene i T-03–T-06, og ulikt de to skrivende
+nabometodene i samme klasse. Ingen ny vurdering: et `SELECT` endrer ingenting, gjentatte kall har
+ingen effekt, og alt ligger i vår egen SQLite-base. `BookingTools` har nå **to** lesende og **to**
+skrivende verktøy — poenget fra T-08 om at hintene hører til metoden, ikke klassen, er dermed
+demonstrert i begge retninger.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 76 tester (69 fra før + 7 nye). De nye dekker: alle bookinger
+uten filter, i `id`-rekkefølge; at en nyopprettet booking dukker opp med det samme og er bit for
+bit det `create_booking` returnerte; filtrering på hver av `PENDING`/`CONFIRMED`/`PAID` med tre
+bookinger i hver sin status samtidig; de to terminale statusene (`COMPLETED`/`CANCELLED`) og at en
+kansellert booking blir liggende i lista uten filter; et filter uten treff (tom liste, ikke feil);
+en helt tom database (tom liste for `null` og for alle fem statusene); og to identiske kall som gir
+identisk svar (`idempotentHint = true`). Statustestene bruker ikke-overlappende datovinduer innenfor
+Kyoto-perioden, som i T-09, så kapasiteten på 3 ikke blander seg inn. Samme opprydding som resten av
+klassen (`DELETE FROM bookings` i `@BeforeEach` + `@AfterEach`).
+
+**2. Gjennom protokollen** — håndtrykk som i T-00, deretter `tools/list` og ni `tools/call` mot den
+nybygde jar-en. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (9): [about_application, check_availability, create_booking, get_booking, list_bookings, update_booking_status, list_destinations, search_destinations, get_quote]`.
+
+| Kall | Resultat |
+|------|----------|
+| `list_bookings` `{}` (tom database) | `isError:false`, `[]` — tom liste, ikke feil |
+| `create_booking` × 2 (Kyoto, 5.–8. og 20.–23. oktober) | `isError:false`, `id: 1` og `id: 2`, begge `PENDING` |
+| `update_booking_status` `{"id":2,"status":"CONFIRMED"}` | `isError:false` |
+| `list_bookings` `{}` | `isError:false`, **begge** bookingene, sortert på id |
+| `list_bookings` `{"status":"CONFIRMED"}` | `isError:false`, bare `id: 2` |
+| `list_bookings` `{"status":"CANCELLED"}` | `isError:false`, `[]` — gyldig status, ingen treff |
+| `list_bookings` `{"status":"BANANA"}` | `isError:true`: skjemavalideringen, se JSON-en over |
+| `list_bookings` `{"status":"pending"}` | `isError:true`: samme melding — `enum` er case-sensitiv |
+
+Lista uten filter, ordrett fra tekstblokken:
+
+```json
+[{"id":1,"customerName":"Ola Nordmann","destinationId":3,"startDate":"2026-10-05","endDate":"2026-10-08","numTravelers":2,"totalPrice":9600.0,"status":"PENDING"},
+ {"id":2,"customerName":"Kari Nordmann","destinationId":3,"startDate":"2026-10-20","endDate":"2026-10-23","numTravelers":1,"totalPrice":4800.0,"status":"CONFIRMED"}]
+```
+
+Elementene er byte for byte de samme JSON-objektene `create_booking` og `update_booking_status`
+returnerte — ingen mapping på veien, som konvensjonen fra T-03 lover. Kontrollregning mot
+`data.sql`: Kyoto 1600/natt uten sesongpris, `1600 × 3 × 2 = 9600` og `1600 × 3 × 1 = 4800`.
+
+De to tomme svarene (`{}` mot tom database, og `CANCELLED` uten treff) er verdt å merke seg ved
+siden av hverandre: begge er `isError:false` med `[]`, og de er umulige å skille fra hverandre uten
+å se argumentene. Det er nøyaktig det beskrivelsen kompenserer for.
+
+> **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07–T-09. Fila ble kopiert før
+> kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptet lå
+> i en scratchpad-katalog utenfor repoet.

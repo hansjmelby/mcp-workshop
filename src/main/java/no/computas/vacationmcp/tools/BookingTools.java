@@ -1,6 +1,7 @@
 package no.computas.vacationmcp.tools;
 
 import java.time.LocalDate;
+import java.util.List;
 import no.computas.vacationmcp.domain.Booking;
 import no.computas.vacationmcp.domain.BookingStatus;
 import no.computas.vacationmcp.service.BookingService;
@@ -195,8 +196,9 @@ public class BookingTools {
                     `update_booking_status` til det. Bruk `create_booking` for å opprette en, og \
                     ta vare på `id`-en du får tilbake derfra — den er det eneste denne oppslaget \
                     godtar. Finnes ikke id-en, får du feilmeldingen «Fant ingen booking med id \
-                    N»; da har du sannsynligvis gjettet på et nummer. Spør brukeren om \
-                    referansen i stedet for å prøve deg fram med flere id-er.""",
+                    N»; da har du sannsynligvis gjettet på et nummer. Kjenner du ikke id-en, \
+                    kall `list_bookings` og finn bookingen i lista, eller spør brukeren om \
+                    referansen — ikke prøv deg fram med flere id-er her.""",
             annotations =
                     @McpTool.McpAnnotations(
                             title = "Hent booking",
@@ -320,5 +322,92 @@ public class BookingTools {
         // BookingStatus.canTransitionTo(...) og kaster ValidationException ved en ulovlig
         // overgang (NotFoundException ved ukjent id). Begge får boble ut (T-04).
         return bookings.updateStatus(id, status);
+    }
+
+    /**
+     * Lister bookinger ved å delegere til {@link BookingService#list(BookingStatus)}, som
+     * returnerer alle når {@code status} er {@code null} og ellers filtrerer på den ene statusen.
+     *
+     * <p><b>Et valgfritt enum — de to lærdommene kombinert.</b> Parameteren er
+     * {@link BookingStatus} (T-09: enum-typen, ikke {@code String}, så skjemaet får en
+     * {@code enum}-liste som validatoren faktisk håndhever) <em>og</em> merket
+     * {@code required = false} (T-04: Spring AI har {@code PROPERTY_REQUIRED_BY_DEFAULT = true},
+     * så et valgfritt argument må sies eksplisitt). Resultatet er et delskjema med begge deler:
+     * {@code {"type":"string","enum":[…]}} i {@code properties}, og et <b>tomt</b>
+     * {@code required}. Kombinasjonen betyr at modellen kan utelate argumentet helt, men at
+     * <em>oppgir</em> den det, må verdien være en av de fem.
+     *
+     * <p>Enum-et er en referansetype, så {@code null} overlever helt fram til tjenesten uten
+     * boksings-trikset {@code Double}/{@code Integer} krevde i T-04 — «ikke oppgitt» er
+     * allerede representerbart.
+     *
+     * <p><b>Svaret er en bar {@code List<Booking>}</b>, ikke en konvolutt à la
+     * {@code AvailabilityResult} fra T-05. Konvolutten der fantes for å gjøre et tomt svar
+     * lesbart, og den begrunnelsen slår ikke til her: den eneste parameteren er en verdi
+     * modellen selv sendte og som skjemaet allerede har validert, og det finnes ingen
+     * «ukjent id gir stille tomt svar»-felle å oppklare. Da står T-03-konvensjonen —
+     * domene-record ut, ingen innpakning — slik den også gjør for {@code list_destinations} og
+     * {@code search_destinations}, som er de nærmeste naboene. At en tom liste er et gyldig svar
+     * og ikke en feil, sies i {@code description} i stedet.
+     *
+     * <p>Hintene er de samme som for {@code get_booking}: et rent {@code SELECT} endrer
+     * ingenting ({@code readOnlyHint = true}, {@code destructiveHint = false}), gjentatte kall
+     * har ingen effekt ({@code idempotentHint = true}), og alt ligger i vår egen SQLite-base
+     * ({@code openWorldHint = false}). De settes per metode, ikke arves fra de skrivende
+     * nabometodene — se klasse-javadoc-en.
+     */
+    @McpTool(
+            name = "list_bookings",
+            title = "List bookinger",
+            description =
+                    """
+                    Lister bookinger, sortert på `id` (eldste først), eventuelt filtrert på \
+                    status. Utelat `status` for å få **alle** bookinger. Bruk verktøyet når \
+                    brukeren spør «hvilke bookinger har jeg?», «hva venter på bekreftelse?» \
+                    eller «vis de betalte» — og når du trenger å finne igjen en booking hvis \
+                    id du ikke har. Har du allerede id-en, bruk `get_booking` i stedet; det \
+                    er ett oppslag i stedet for hele lista.
+
+                    Hvert element er en hel booking: `id`, `customerName`, `destinationId`, \
+                    `startDate`, `endDate`, `numTravelers`, `totalPrice` i norske kroner og \
+                    `status`. `destinationId` er en id, ikke et navn — slå den opp med \
+                    `list_destinations` hvis brukeren skal se hva reisemålet heter.
+
+                    En **tom liste er et gyldig svar**, ikke en feil: den betyr at det ikke \
+                    finnes noen booking med den statusen (eller ingen bookinger i det hele \
+                    tatt, hvis du ikke filtrerte). Si det til brukeren i stedet for å melde at \
+                    noe gikk galt, og prøv gjerne uten filter for å se om det finnes bookinger \
+                    med en annen status. Merk at kansellerte bookinger blir liggende med status \
+                    `CANCELLED` — de forsvinner ikke fra lista, men teller ikke lenger mot \
+                    kapasiteten.
+
+                    Verktøyet **endrer ingenting** og kan trygt kalles på nytt. Bruk \
+                    `create_booking` for å opprette en booking og `update_booking_status` for å \
+                    flytte en videre i livssyklusen.""",
+            annotations =
+                    @McpTool.McpAnnotations(
+                            title = "List bookinger",
+                            readOnlyHint = true,
+                            destructiveHint = false,
+                            idempotentHint = true,
+                            openWorldHint = false))
+    public List<Booking> listBookings(
+            @McpToolParam(
+                            required = false,
+                            description =
+                                    """
+                                    Valgfritt statusfilter. **Utelat parameteren** for å få alle \
+                                    bookinger — ikke finn på en verdi for å «fylle den ut». \
+                                    Oppgir du den, må det være én av de fem verdiene i skjemaet, \
+                                    skrevet med store bokstaver: `PENDING` (opprettet, ikke \
+                                    bekreftet), `CONFIRMED` (bekreftet, ikke betalt), `PAID` \
+                                    (betalt), `COMPLETED` (gjennomført) eller `CANCELLED` \
+                                    (avlyst). Bare den ene statusen kommer med — det går ikke an \
+                                    å be om flere på én gang, så kall verktøyet en gang per \
+                                    status, eller uten filter og sorter selv.""")
+                    BookingStatus status) {
+        // null = alle: BookingService.list velger mellom findAll() og findByStatus(...).
+        // Ingen filtrering, sortering eller innpakning her — repository-et sorterer på id.
+        return bookings.list(status);
     }
 }

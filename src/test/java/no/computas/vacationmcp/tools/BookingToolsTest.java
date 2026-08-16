@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.LocalDate;
+import java.util.List;
 import no.computas.vacationmcp.domain.Booking;
 import no.computas.vacationmcp.domain.BookingStatus;
 import no.computas.vacationmcp.service.BookingService;
@@ -398,5 +399,120 @@ class BookingToolsTest {
                                 NotFoundException.class,
                                 () -> tools.updateBookingStatus(999L, BookingStatus.CONFIRMED))
                         .getMessage());
+    }
+
+    // --- T-10 · list_bookings -----------------------------------------------------------
+
+    /** Id-ene i en liste, i den rekkefølgen de kom — gjør forventningene lesbare. */
+    private static List<Long> ider(List<Booking> bookinger) {
+        return bookinger.stream().map(Booking::id).toList();
+    }
+
+    /**
+     * {@code null} betyr «alle» — det er nettopp derfor parameteren er
+     * {@code required = false} i skjemaet. Rekkefølgen er {@code ORDER BY id} fra
+     * {@code BookingRepository}, altså eldste først.
+     */
+    @Test
+    void listsAllBookingsWhenNoStatusIsGiven() {
+        long første = bookingStartingOn(5).id();
+        long andre = bookingStartingOn(10).id();
+        long tredje = bookingStartingOn(15).id();
+
+        assertEquals(List.of(første, andre, tredje), ider(tools.listBookings(null)));
+    }
+
+    /** Nyopprettede bookinger dukker opp uten noe ekstra steg — lista leses live. */
+    @Test
+    void newlyCreatedBookingsShowUpInTheList() {
+        assertEquals(List.of(), tools.listBookings(null), "tom database før noe er opprettet");
+
+        Booking opprettet = tools.createBooking("Ola Nordmann", KYOTO, FROM, TO, 2);
+
+        List<Booking> etterpå = tools.listBookings(null);
+        assertEquals(1, etterpå.size());
+        // Elementet er byte for byte det create_booking returnerte — ingen mapping underveis.
+        assertEquals(opprettet, etterpå.getFirst());
+
+        Booking neste = bookingStartingOn(20);
+        assertEquals(List.of(opprettet.id(), neste.id()), ider(tools.listBookings(null)));
+    }
+
+    /**
+     * Filteret treffer én status om gangen. Her plasseres tre bookinger i hver sin status, og
+     * hver av de tre spørringene skal gi nøyaktig sin egen.
+     */
+    @Test
+    void filtersOnEachRelevantStatus() {
+        long pending = bookingStartingOn(5).id();
+
+        long confirmed = bookingStartingOn(10).id();
+        tools.updateBookingStatus(confirmed, BookingStatus.CONFIRMED);
+
+        long paid = bookingStartingOn(15).id();
+        tools.updateBookingStatus(paid, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(paid, BookingStatus.PAID);
+
+        assertEquals(List.of(pending), ider(tools.listBookings(BookingStatus.PENDING)));
+        assertEquals(List.of(confirmed), ider(tools.listBookings(BookingStatus.CONFIRMED)));
+        assertEquals(List.of(paid), ider(tools.listBookings(BookingStatus.PAID)));
+        // Uten filter kommer alle tre, fortsatt sortert på id.
+        assertEquals(List.of(pending, confirmed, paid), ider(tools.listBookings(null)));
+        // Ingen av dem har nådd endestasjonene ennå.
+        assertEquals(List.of(), tools.listBookings(BookingStatus.COMPLETED));
+        assertEquals(List.of(), tools.listBookings(BookingStatus.CANCELLED));
+    }
+
+    /** De to terminale statusene, som bare kan nås via {@code update_booking_status}. */
+    @Test
+    void filtersOnTheTerminalStatusesToo() {
+        long fullført = bookingStartingOn(5).id();
+        tools.updateBookingStatus(fullført, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(fullført, BookingStatus.PAID);
+        tools.updateBookingStatus(fullført, BookingStatus.COMPLETED);
+
+        long avlyst = bookingStartingOn(10).id();
+        tools.updateBookingStatus(avlyst, BookingStatus.CANCELLED);
+
+        assertEquals(List.of(fullført), ider(tools.listBookings(BookingStatus.COMPLETED)));
+        assertEquals(List.of(avlyst), ider(tools.listBookings(BookingStatus.CANCELLED)));
+        // En kansellert booking blir liggende i lista — den forsvinner ikke.
+        assertEquals(List.of(fullført, avlyst), ider(tools.listBookings(null)));
+        assertEquals(List.of(), tools.listBookings(BookingStatus.PENDING));
+    }
+
+    /**
+     * Et filter uten treff gir en <b>tom liste</b>, ikke en feil. Dette er beslutningen om
+     * svarformen i praksis: verktøyet returnerer en bar liste (ingen konvolutt à la
+     * {@code AvailabilityResult} i T-05), og at tomt er et gyldig svar sies i
+     * {@code description} i stedet.
+     */
+    @Test
+    void returnsAnEmptyListWhenTheFilterMatchesNothing() {
+        bookingStartingOn(5); // én PENDING-booking finnes
+
+        assertEquals(List.of(), tools.listBookings(BookingStatus.PAID));
+        assertEquals(1, tools.listBookings(BookingStatus.PENDING).size());
+    }
+
+    /** Ingen bookinger i det hele tatt: også en tom liste, ikke en {@code NotFoundException}. */
+    @Test
+    void returnsAnEmptyListWhenThereAreNoBookingsAtAll() {
+        assertEquals(List.of(), tools.listBookings(null));
+        for (BookingStatus status : BookingStatus.values()) {
+            assertEquals(List.of(), tools.listBookings(status), status.name());
+        }
+    }
+
+    /** {@code idempotentHint = true} i praksis: samme spørring, samme svar. */
+    @Test
+    void repeatedListingsReturnTheSameResult() {
+        bookingStartingOn(5);
+        bookingStartingOn(10);
+
+        assertEquals(tools.listBookings(null), tools.listBookings(null));
+        assertEquals(
+                tools.listBookings(BookingStatus.PENDING),
+                tools.listBookings(BookingStatus.PENDING));
     }
 }
