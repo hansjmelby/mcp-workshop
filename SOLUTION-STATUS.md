@@ -28,7 +28,7 @@ etterpå. Én commit per oppgave.
 | T-15 | Prompts | ✅ | Ny pakke `prompts/` → `prompts/VacationPrompts.java` med **to** `@McpPrompt`: `plan_vacation_within_budget` (en **arbeidsflyt uttrykt som tekst** — fem argumenter, to obligatoriske, som skriver ut rekkefølgen T-03→T-07 skal kalles i) og `travel_summary` (instruksjon + bookingen **vedlagt** som `EmbeddedResource` med innhold gjenbrukt fra `booking://{id}`). Tredje og siste primitiv: **brukerstyrt** (menyvalg/slash-kommando), mot modellstyrte verktøy og applikasjonsstyrte ressurser. Empirisk verifisert at prompt-argumenter er en flat liste uten `inputSchema` (`@McpArg`, ikke `@McpToolParam`), at `required` **ikke håndheves av noen**, og at en `String`-returverdi gir rollen `assistant`; test `prompts/VacationPromptsTest.java` med 14 tester ([se under](#t-15--prompts)) |
 | T-16 | `bookings_report` | ✅ | Ny verktøyklasse `tools/ReportTools.java` → `bookings_report` (tre valgfrie parametere), og — **den ene oppgaven med ny kode i tjenestelaget** — `service/ReportingService.java` + `service/BookingsReport.java`. Aggregeringen ble lagt i Java over eksisterende repository-metoder, ikke i ny SQL; **ingen** repository-metode er endret eller lagt til. Definisjonene: **omsetning** = `totalPrice` for alt unntatt `CANCELLED` (`PENDING` er med, men skilles ut i `pendingRevenue`; kansellert rapporteres for seg), **belegg** = plassdøgn `bookedNights / capacityNights` per `availability`-rad, med T-11s kapasitetskartlegging som premiss. Test `tools/ReportToolsTest.java` med 14 tester ([se under](#t-16--bookings_report)). **Epic 6 ferdig.** |
 | T-17 | Streamable HTTP-transport | ✅ | **Ingen Java-kode** — kun bygg og konfigurasjon. `spring-ai-starter-mcp-server-webmvc` lagt til *ved siden av* stdio-starteren, og transporten slås om med Spring-profilen `http` (ny fil `src/main/resources/application-http.properties`). Uten profil: uendret stdio-server, ingen Tomcat (`spring.main.web-application-type=none`). Med profil: Streamable HTTP på `POST http://localhost:8080/mcp`. `logback-spring.xml` bytter konsoll-appenderen fra stderr til **stdout** i `http`-profilen, siden protokollen ikke eier stdout lenger. Begge transportene verifisert gjennom protokollen; alle 135 tester uendret grønne ([se under](#t-17--streamable-http-transport)) |
-| T-18 | Bearer-token-auth | ⬜ | — |
+| T-18 | Bearer-token-auth | ✅ | Én ny fil: `config/BearerTokenAuthFilter.java` — et `OncePerRequestFilter` med `@Profile("http")`, **ingen ny avhengighet** (Spring Security valgt bort, begrunnet under). Krever `Authorization: Bearer <token>` på alle forespørsler; avviser med `401` + `WWW-Authenticate` (ikke `403`, ikke stacktrace) før JSON-RPC i det hele tatt starter. Tokenet konfigureres med `workshop.http.auth.token` / `WORKSHOP_HTTP_AUTH_TOKEN`; står det tomt **genererer** serveren ett og logger det, så endepunktet aldri er åpent ved et uhell (tredje vei mellom «nekt å starte» og «kjør åpent med WARN»). stdio-modus er bit for bit uendret — filteret opprettes ikke uten profilen; alle 135 tester uendret grønne ([se under](#t-18--bearer-token-auth)) |
 | T-19 | Koble Claude til remote-serveren | ⬜ | — |
 | T-20 | Elicitation (bonus) | ⬜ | — |
 | T-21 | Sampling (bonus) | ⬜ | — |
@@ -3088,7 +3088,7 @@ transportuavhengige** — det er hele poenget med å bytte transport: ingen `@Mc
 | `Accept`-krav | — | **må** inneholde `application/json, text/event-stream` (ellers `400`) |
 | stdout | eid av protokollen — all logg til stderr | ledig — logg til stdout |
 | Samtidige klienter | én | mange, hver med sin sesjons-id |
-| Autentisering | arves fra prosessen som startet den | finnes ikke ennå → **T-18** |
+| Autentisering | arves fra prosessen som startet den | bearer-token, lagt til i **T-18** ([se under](#t-18--bearer-token-auth)) |
 
 To ting som overrasker første gang:
 
@@ -3157,3 +3157,241 @@ port 8080 er ledig og ingen java-prosess henger igjen.
 | Tomcat starter i stdio-modus og «spiser» port 8080 | `spring.main.web-application-type=none` mangler | Linja hører hjemme i `application.properties`, og må gjentas i testressursene |
 | Svaret ser ut som søppel (`id:…`, `event:message`) | Det *er* SSE, ikke en feil | `| sed -n 's/^data://p'` |
 | JSON-RPC-linjer forsvinner i loggen i stdio-modus | Konsoll-appenderen er byttet til stdout | `<springProfile name="http">` styrer dette — sjekk at profilen ikke er aktiv ved en feil |
+
+### T-18 · Bearer-token-auth
+
+Én ny Java-fil og fem linjer konfigurasjon. **Ingen ny avhengighet.**
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/config/BearerTokenAuthFilter.java` | **ny** — `OncePerRequestFilter` med `@Profile("http")` og `@Order(HIGHEST_PRECEDENCE)` |
+| `src/main/resources/application-http.properties` | `workshop.http.auth.token=` (tom → generert) + `workshop.http.auth.enabled=true` |
+| `README.md` | HTTP-seksjonen fra T-17 viser nå token-bruk, oppstartslogg og de to 401-svarene |
+
+Ingen `@McpTool`, `@McpResource` eller `@McpPrompt` er rørt, og `build.gradle.kts` er urørt.
+Auth er en egenskap ved **transporten**, ikke ved primitivene.
+
+#### Valget: eget filter, ikke `spring-boot-starter-security`
+
+Begge veiene ble vurdert. Regnestykket:
+
+| | (a) `OncePerRequestFilter` — **valgt** | (b) `spring-boot-starter-security` |
+|---|---|---|
+| Nye avhengigheter | 0 | `spring-security-web`, `-config`, `-core`, `-crypto` |
+| Kode å lese | én klasse, ~60 linjer uten javadoc, lineær | `SecurityFilterChain`-bean + en `AuthenticationFilter`/`AuthenticationManager`, eller en `OncePerRequestFilter` **inni** kjeden — altså (a) *pluss* rammeverket |
+| Ting deltakeren må skjønne først | `Authorization`-headeren, 401, `WWW-Authenticate` | i tillegg: filterkjeden, `SecurityContext`, `Authentication`, `AuthenticationEntryPoint`, CSRF, `SessionCreationPolicy` |
+| Fallgruver ut av boksen | ingen | **CSRF er på** og blokkerer `POST /mcp` (`403`); default gir `403` der vi vil ha `401`; `formLogin` og et generert passord i loggen om man ikke slår dem av |
+
+Poenget med T-18 er at deltakeren skal se **hva et bearer-token faktisk er over ledningen** —
+en header, en sammenligning, et `401` med en `WWW-Authenticate`-utfordring. Med Spring Security
+blir alle tre usynlige bak konfigurasjon, og de tre første tingene man lærer er hvordan man
+skrur *av* rammeverkets defaults (`csrf.disable()`, `formLogin.disable()`,
+`sessionManagement(STATELESS)`) — ren støy for et endepunkt med nøyaktig én regel.
+
+**Når (b) er riktig svar:** i det øyeblikket det finnes mer enn én regel — flere brukere, roller,
+utløpstid, JWT-signaturvalidering, eller MCP-spesifikasjonens OAuth 2.1-modell. Da er
+`spring-boot-starter-oauth2-resource-server` (én linje: `oauth2ResourceServer(jwt())`) mindre kode
+enn å skrive det selv, og *da* betaler avhengigheten seg. Grensen går ved «statisk delt
+hemmelighet» — over den skal man ikke håndrulle.
+
+#### Default-oppførsel uten token: generer ett, ikke «start åpent», ikke «nekt å starte»
+
+Oppgaven stiller opp to alternativer. Begge er dårlige her:
+
+- **Start med auth avskrudd + WARN.** Et WARN er lett å scrolle forbi i en Spring-oppstartslogg,
+  og resultatet er et endepunkt som ser beskyttet ut i dokumentasjonen mens det står åpent i
+  praksis. Et workshop-skall som stille kjører uten beskyttelse lærer bort feil vane.
+- **Nekt å starte.** Trygt, men irriterende: `--spring.profiles.active=http` slutter å virke alene,
+  og deltakeren må finne på et token før hun får se transporten i det hele tatt. Feilmeldingen
+  kommer dessuten som en `BeanCreationException` — dårlig førsteinntrykk.
+
+**Valgt: serveren genererer et tilfeldig token (UUID) og skriver det i oppstartsloggen.** Auth er
+alltid på i `http`-profilen, det finnes ingen ubeskyttet tilstand, og deltakeren kommer i gang med
+copy-paste. Samme mønster som MCP Inspector sin `MCP_INSPECTOR_API_TOKEN` (T-01) og Spring
+Security sitt genererte passord — altså noe deltakeren allerede har sett i denne workshopen.
+
+```
+WARN … n.c.v.config.BearerTokenAuthFilter : Ingen workshop.http.auth.token er satt — genererte et tilfeldig token for denne kjøringen:
+
+    Authorization: Bearer 408f457c-1953-4af9-944d-06317c78ff0c
+
+Tokenet endres ved hver omstart. Sett WORKSHOP_HTTP_AUTH_TOKEN (eller
+workshop.http.auth.token) for et fast token.
+```
+
+Prisen er at tokenet endres ved hver omstart — som er nettopp grunnen til å sette det selv, og
+det står i meldingen. De to andre tilstandene logges også, så oppsettet aldri er usynlig:
+
+| Konfigurasjon | Ved oppstart |
+|---|---|
+| `workshop.http.auth.token=<verdi>` | `INFO … krever bearer-token (workshop.http.auth.token, 20 tegn)` — verdien logges aldri |
+| tom (default) | `WARN` med det genererte tokenet, som over |
+| `workshop.http.auth.enabled=false` | `WARN ADVARSEL: MCP-endepunktet er UBESKYTTET … Alle som når porten kan kalle create_booking og cancel_booking.` |
+
+Tokenet leses med `@Value("${workshop.http.auth.token:}")`, så Spring sin relaxed binding gir
+miljøvariabelen **`WORKSHOP_HTTP_AUTH_TOKEN`** gratis — verifisert, ikke antatt. Det er den
+formen som hører hjemme i en container/CI, og den som holder hemmeligheten ute av git.
+
+#### Detaljer verdt å merke seg i filteret
+
+- **`@Profile("http")` er hele avgrensningen mot stdio.** Beanen opprettes ikke uten profilen, så
+  stdio-modus (og testkonteksten, som kjører `web-application-type=none`) er bit for bit uendret.
+  Klassen kan trygt referere til `jakarta.servlet` — `spring-boot-starter-web` har ligget på
+  klassestien siden T-17 uansett.
+- **Filteret gjelder alle stier, ikke bare `/mcp`.** Applikasjonen har nøyaktig ett endepunkt, og
+  «nekt alt som ikke er eksplisitt åpnet» er regelen som holder seg når noen legger til et
+  endepunkt nummer to. Det dekker samtidig alle tre metodene Streamable HTTP bruker mot samme
+  sti: `POST` (JSON-RPC), `GET` (SSE-strømmen) og `DELETE` (avslutt sesjon) — alle tre verifisert
+  under. Merk at `OncePerRequestFilter` som default *ikke* kjører på ERROR-dispatch
+  (`shouldNotFilterErrorDispatch()`), så Spring Boots interne `/error`-forward blir ikke låst ute
+  av sitt eget filter.
+- **`401` + `WWW-Authenticate`, ikke `403`.** `401` betyr «jeg vet ikke hvem du er», og
+  `WWW-Authenticate` er det obligatoriske svaret på *hvordan* du autentiserer deg. `403` ville
+  betydd «jeg vet hvem du er, du har ikke lov» — feil budskap, og en klient kan ikke handle på det.
+  RFC 6750-nyansen er tatt med: mangler headeren er utfordringen bare `Bearer realm="…"` (klienten
+  har ennå ikke gjort noe galt), er tokenet feil legges `error="invalid_token"` til.
+- **Svaret er HTTP, ikke JSON-RPC.** Sjekken skjer *før* protokollen; en klient som ikke slipper
+  inn har ingen sesjon å feile innenfor. Derfor er body-en et lite JSON-objekt med en pekepinn, og
+  ikke en JSON-RPC-`error` — vi finner ikke opp en feilkode som ikke finnes i spesifikasjonen.
+  Dette er også formen MCP-spesifikasjonens autorisasjonsmodell bruker.
+- **`MessageDigest.isEqual` i stedet for `String.equals`.** Konstant tid, én linje. Den gjør ikke
+  et statisk token til noe annet enn et statisk token, men den koster ingenting.
+- **Avviste kall logges** med metode, sti, avsenderadresse og grunn — aldri med tokenet.
+
+#### Hva dette *ikke* er
+
+Et statisk delt token er ikke OAuth: det er ingen bruker, ingen scopes, ingen utløpstid, og
+ingen måte å trekke tilbake tilgangen for én klient uten å bytte token for alle.
+MCP-spesifikasjonen har en egen autorisasjonsmodell for remote-servere — OAuth 2.1 med
+Protected Resource Metadata, der `401`-svaret vårt bare er første steg og en ekte server peker
+klienten videre til sin authorization server i `WWW-Authenticate`. Se
+[MCP · Authorization](https://modelcontextprotocol.io/specification/draft/basic/authorization).
+
+#### Verifisering
+
+**1. `./gradlew build` grønt** — **135 tester**, uendret fra T-16/T-17. Ingen ny test er lagt til:
+filteret er kun aktivt i `http`-profilen, som testkonteksten aldri kjører, og en `MockMvc`-test
+ville testet Spring sitt filterregister mer enn vår ene regel. Kontrakten er verifisert der den
+gjelder — over ekte HTTP, under.
+
+**2. stdio-regresjon** — røyktesten fra CLAUDE.md kjørt mot den nye jar-en. Stdout ga **nøyaktig
+to** rene JSON-linjer (`initialize` + `tools/list` med alle 11 verktøy). Stderr hadde **null**
+treff på «tomcat»/«servlet» *og* null treff på «bearer»/«auth» — filteret finnes rett og slett
+ikke i den kjøringen.
+
+**3. HTTP** — serveren startet i bakgrunnen med
+`WORKSHOP_HTTP_AUTH_TOKEN=workshop-hemmelighet … --spring.profiles.active=http`
+(oppstartslogg: `Tomcat started on port 8080`, `MCP-endepunktet krever bearer-token (…, 20 tegn)`).
+
+*Uten token* — samme `initialize` som i T-17, bare uten `Authorization`:
+
+```http
+HTTP/1.1 401
+WWW-Authenticate: Bearer realm="vacation-booking-mcp"
+Content-Type: application/json;charset=UTF-8
+
+{"error":"unauthorized","message":"Send 'Authorization: Bearer <token>'. Tokenet settes med workshop.http.auth.token / WORKSHOP_HTTP_AUTH_TOKEN."}
+```
+
+*Med feil token* (`Authorization: Bearer feil-token`) — samme status og body, utvidet utfordring:
+
+```http
+HTTP/1.1 401
+WWW-Authenticate: Bearer realm="vacation-booking-mcp", error="invalid_token", error_description="ugyldig token"
+```
+
+*Alle tre metodene mot `/mcp`* uten token, og et POST-kall med en **gyldig sesjons-id** men uten
+header — sesjonen hjelper ikke, auth sjekkes først:
+
+| Kall | Status |
+|------|--------|
+| `POST /mcp` (initialize) uten token | `401` |
+| `POST /mcp` med feil token | `401` |
+| `GET /mcp` (SSE-strømmen) uten token | `401` |
+| `DELETE /mcp` (avslutt sesjon) uten token | `401` |
+| `POST /mcp` med gyldig `Mcp-Session-Id`, uten token | `401` |
+
+Serverloggen har én linje per avvisning:
+
+```
+WARN … BearerTokenAuthFilter : 401 Unauthorized: POST /mcp fra 0:0:0:0:0:0:0:1 — mangler Authorization: Bearer <token>
+WARN … BearerTokenAuthFilter : 401 Unauthorized: POST /mcp fra 0:0:0:0:0:0:0:1 — ugyldig token
+WARN … BearerTokenAuthFilter : 401 Unauthorized: GET /mcp fra 0:0:0:0:0:0:0:1 — mangler Authorization: Bearer <token>
+WARN … BearerTokenAuthFilter : 401 Unauthorized: DELETE /mcp fra 0:0:0:0:0:0:0:1 — mangler Authorization: Bearer <token>
+```
+
+*Med riktig token* — hele T-17-sekvensen, nå med `-H "Authorization: Bearer $TOKEN"` på hvert kall:
+
+```bash
+TOKEN=workshop-hemmelighet
+
+# 1) initialize — sesjons-id-en ligger i responsHEADEREN
+SID=$(curl -sS -D - -o /dev/null -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | tr -d '\r' | sed -n 's/^Mcp-Session-Id: //p')
+
+# 2) notifications/initialized → 202 Accepted
+curl -sS -X POST http://localhost:8080/mcp -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3) tools/list — SSE; sed-en plukker ut JSON-en
+curl -sS -X POST http://localhost:8080/mcp -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | sed -n 's/^data://p'
+
+# 4) tools/call
+curl -sS -X POST http://localhost:8080/mcp -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_destinations","arguments":{"country":"Norge"}}}' \
+  | sed -n 's/^data://p'
+
+# 5) avslutt sesjonen — også DELETE krever token
+curl -sS -X DELETE http://localhost:8080/mcp -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID"
+```
+
+Faktiske svar — identiske med T-17, tokenet endrer ingenting *innenfor* protokollen:
+
+```jsonc
+// 1) HTTP/1.1 200 · Mcp-Session-Id: adf30a50-de44-429e-84e2-ac9ba727873b · Content-Type: application/json
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"completions":{},"logging":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true}},"serverInfo":{"name":"vacation-booking-mcp","version":"0.0.1"}}}
+
+// 2) HTTP/1.1 202 · tom body
+
+// 3) HTTP/1.1 200 · text/event-stream → alle 11 verktøy
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"about_application", … ,{"name":"bookings_report", …}]}}
+
+// 4)
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[{\"id\":1,\"name\":\"Lofoten Rorbuer\",\"country\":\"Norge\",…}]"}],"isError":false}}
+
+// 5) HTTP/1.1 200
+```
+
+`GET /mcp` **med** token ble også kjørt: ingen avvisning i loggen, og `curl` blir stående og vente
+(`--max-time` slår inn) — det er riktig oppførsel for en SSE-strøm som serveren ennå ikke har noe
+å pushe på, ikke en autentiseringsfeil. Med det er alle tre metodene bekreftet på begge sider av
+sjekken.
+
+Det genererte tokenet ble verifisert i en egen kjøring uten `WORKSHOP_HTTP_AUTH_TOKEN`: samme
+`initialize` ga `401` uten header og `200` med tokenet fra oppstartsloggen.
+
+> Alle kall var lesende, og `vacation.db` ble kopiert før kjøringen — den var bit-identisk
+> etterpå. Hjelpefiler lå i en scratchpad-katalog utenfor repoet. Begge bakgrunnsprosessene ble
+> stoppet; `pgrep` fant ingen rester og port 8080 er ledig.
+
+#### Fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| `401` selv med riktig token | Serveren ble startet på nytt uten `WORKSHOP_HTTP_AUTH_TOKEN` og genererte et nytt | Hent tokenet fra oppstartsloggen, eller sett miljøvariabelen |
+| `401` på alle kall etter en restart | Samme sak: generert token er nytt per kjøring | Sett et fast token når du skal jobbe over tid |
+| Klienten sier «403 Forbidden» | Ikke fra oss — noe annet står i veien (proxy) | Vårt filter svarer alltid `401` med `WWW-Authenticate` |
+| Tokenet virker i `curl`, men ikke fra hosten | Hosten sender ikke `Authorization` uten at den er konfigurert til det | Det er T-19 — hosten må få headeren i sin serverkonfigurasjon |
+| Auth «forsvant» | Serveren kjører uten `http`-profilen (stdio), eller med `workshop.http.auth.enabled=false` | Sjekk oppstartsloggen: `krever bearer-token` eller `UBESKYTTET` står der |
+| Tokenet havnet i git | Skrevet inn i `application-http.properties` | Bruk `WORKSHOP_HTTP_AUTH_TOKEN`; fila i repoet skal ha tom verdi |

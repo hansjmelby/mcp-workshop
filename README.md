@@ -191,28 +191,63 @@ Samme jar, samme verktøy — men som en vanlig webtjeneste i stedet for en pros
 starter. Slås på med Spring-profilen **`http`**:
 
 ```bash
-java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar --spring.profiles.active=http
+WORKSHOP_HTTP_AUTH_TOKEN=hemmelig-token \
+  java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar --spring.profiles.active=http
 # eller: SPRING_PROFILES_ACTIVE=http java -jar build/libs/…jar
-# (PowerShell: $env:SPRING_PROFILES_ACTIVE="http"; java -jar build\libs\…jar)
+# (PowerShell: $env:SPRING_PROFILES_ACTIVE="http"; $env:WORKSHOP_HTTP_AUTH_TOKEN="hemmelig-token"; java -jar build\libs\…jar)
 ```
 
 Endepunktet er **`http://localhost:8080/mcp`**. Uten profilen er serveren nøyaktig som før —
 en stdio-server som ikke starter noen webserver. Alt som er profilspesifikt ligger i
 [`application-http.properties`](src/main/resources/application-http.properties).
 
-To ting skiller en Streamable HTTP-klient fra en stdio-klient, og begge er lette å gå på:
+Tre ting skiller en Streamable HTTP-klient fra en stdio-klient, og alle er lette å gå på:
 
 1. **`Accept` må inneholde *begge* typene** — `application/json, text/event-stream`. Sender du
    bare `application/json`, svarer serveren `400`.
 2. **Sesjons-id-en fra `initialize` må sendes med videre.** Svaret på `initialize` har headeren
    `Mcp-Session-Id: <uuid>`; alle senere kall må ha den samme headeren tilbake. Uten den får du
    `Session ID missing`.
+3. **Hvert kall må ha `Authorization: Bearer <token>`** — også `GET` (SSE-strømmen) og `DELETE`
+   (avslutt sesjon). Uten, eller med feil token, får du `401` (se under).
+
+#### Tokenet
+
+En stdio-server er like utsatt som prosessen hosten startet; et HTTP-endepunkt kan alle som når
+porten kalle. Derfor krever `http`-profilen et **bearer-token** ([`BearerTokenAuthFilter`](src/main/java/no/computas/vacationmcp/config/BearerTokenAuthFilter.java)):
+
+| Hvordan | Kommando |
+|---------|----------|
+| Miljøvariabel (anbefalt) | `WORKSHOP_HTTP_AUTH_TOKEN=hemmelig-token java -jar …` |
+| Kommandolinje | `java -jar … --spring.profiles.active=http --workshop.http.auth.token=hemmelig-token` |
+| Ingenting | serveren **genererer** et token ved oppstart og skriver det i loggen |
+
+Setter du ingenting, ser oppstartsloggen slik ut — kopier tokenet derfra:
+
+```
+WARN … BearerTokenAuthFilter : Ingen workshop.http.auth.token er satt — genererte et tilfeldig token for denne kjøringen:
+
+    Authorization: Bearer 408f457c-1953-4af9-944d-06317c78ff0c
+```
+
+Endepunktet er altså aldri åpent ved et uhell. Vil du likevel kjøre uten (demo/feilsøking):
+`--workshop.http.auth.enabled=false`, som gir et tydelig WARN om at hvem som helst kan kalle
+`create_booking`. **stdio-modus er helt uberørt** — der finnes ingen nettverksflate å beskytte,
+og filteret opprettes ikke i det hele tatt.
+
+> **Dette er ikke OAuth.** Et delt, statisk token sier bare «du kjenner hemmeligheten»: ingen
+> bruker, ingen scopes, ingen utløpstid. MCP-spesifikasjonen har en egen autorisasjonsmodell for
+> remote-servere (OAuth 2.1 + Protected Resource Metadata) — se
+> [MCP · Authorization](https://modelcontextprotocol.io/specification/draft/basic/authorization).
 
 En hel MCP-økt med `curl` (bash — Git Bash/WSL på Windows):
 
 ```bash
+TOKEN=hemmelig-token   # samme verdi som serveren ble startet med
+
 # 1) initialize — plukk sesjons-id-en ut av responsheaderne
 SID=$(curl -sS -D - -o /dev/null -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
@@ -220,26 +255,48 @@ SID=$(curl -sS -D - -o /dev/null -X POST http://localhost:8080/mcp \
 
 # 2) notifications/initialized — ingen id, ingen respons (svarer 202 Accepted)
 curl -sS -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3) tools/list — svaret kommer som SSE; `sed -n 's/^data://p'` plukker ut JSON-en
 curl -sS -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | sed -n 's/^data://p'
 
 # 4) tools/call
 curl -sS -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_destinations","arguments":{"country":"Norge"}}}' \
   | sed -n 's/^data://p'
 
-# 5) avslutt sesjonen (valgfritt)
-curl -sS -X DELETE http://localhost:8080/mcp -H "Mcp-Session-Id: $SID"
+# 5) avslutt sesjonen (valgfritt) — også DELETE krever token
+curl -sS -X DELETE http://localhost:8080/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID"
 ```
+
+Slik ser et avvist kall ut. Merk `401` (ikke `403`) og `WWW-Authenticate`-headeren, som er det
+som forteller klienten *hvordan* den skal autentisere seg:
+
+```http
+# uten token
+HTTP/1.1 401
+WWW-Authenticate: Bearer realm="vacation-booking-mcp"
+
+# med feil token
+HTTP/1.1 401
+WWW-Authenticate: Bearer realm="vacation-booking-mcp", error="invalid_token", error_description="ugyldig token"
+
+{"error":"unauthorized","message":"Send 'Authorization: Bearer <token>'. …"}
+```
+
+Svaret er ren HTTP, ikke JSON-RPC: sjekken skjer *før* protokollen, og en klient som ikke
+slipper inn har ingen sesjon å feile innenfor.
 
 > **Merk formatet:** svaret på `initialize` er rå `application/json`, mens svarene *etter*
 > håndtrykket kommer som `text/event-stream` (`event:message` + `data:{…}`). Det er derfor
