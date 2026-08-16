@@ -53,6 +53,15 @@ public class BookingTools {
      * validering, prisberegning og kapasitetssjekk og lagrer med status
      * {@link BookingStatus#PENDING}.
      *
+     * <p><b>Kapasitetsregelen (T-11) ligger i tjenesten, ikke her.</b> {@code BookingService}
+     * finner den ene {@code availability}-raden som dekker hele oppholdet, trekker fra summen av
+     * reisende i alle ikke-kansellerte bookinger på reisemålet som overlapper datoene
+     * ({@code BookingRepository.sumActiveTravelers}), og kaster {@code ValidationException} hvis
+     * det ikke er nok igjen. Verktøyet legger ingen sjekk oppå — jobben er å formidle meldingen
+     * videre, og det er derfor {@code description} bruker plass på hva modellen skal gjøre med
+     * «N ledige plasser, M forespurt». Se T-11-seksjonen i {@code SOLUTION-STATUS.md} for
+     * regnestykket i detalj.
+     *
      * <p><b>Hintene, og hva de betyr for en host som spør brukeren om bekreftelse:</b>
      *
      * <ul>
@@ -95,13 +104,30 @@ public class BookingTools {
                     slik de ble lagret. Oppgi alltid id-en i svaret ditt til brukeren.
 
                     Verktøyet validerer alt selv og avviser med en forklarende feilmelding: \
-                    ukjent reisemål, `from` etter `to`, færre enn 1 reisende, datoer som ingen \
-                    **enkelt** tilgjengelighetsperiode dekker, tomt kundenavn — og for få \
-                    ledige plasser («Ikke nok kapasitet i perioden: N ledige plasser, M \
-                    forespurt»). Får du kapasitetsfeilen, er reisemålet delvis fullt: foreslå \
-                    færre reisende eller andre datoer, og bruk `check_availability` for å se \
-                    periodenes kapasitet. `get_quote` gir prisen uten å booke noe — bruk den \
-                    når brukeren bare lurer på hva det koster.""",
+                    ukjent reisemål, `from` etter `to`, færre enn 1 reisende, tomt kundenavn, \
+                    og datoer som ingen **enkelt** tilgjengelighetsperiode dekker («Ingen \
+                    tilgjengelig periode dekker …» — et opphold som krysser skjøten mellom to \
+                    perioder avvises selv om begge periodene er åpne). `get_quote` gir prisen \
+                    uten å booke noe — bruk den når brukeren bare lurer på hva det koster.
+
+                    Er det for få plasser igjen, avvises kallet med «Ikke nok kapasitet i \
+                    perioden: N ledige plasser, M forespurt», og **ingenting lagres**. N \
+                    gjelder nøyaktig de datoene du spurte om, og er periodens kapasitet minus \
+                    alle bookinger på reisemålet som overlapper datoene — uansett status, \
+                    bortsett fra `CANCELLED`. Slik bruker du tallet:
+
+                    - **N ≥ 1:** foreslå N reisende eller færre på samme datoer, så går det \
+                    gjennom. Resten av følget må eventuelt bookes på andre datoer.
+                    - **N = 0:** færre reisende hjelper ikke — det er fullt. Foreslå andre \
+                    datoer eller et annet reisemål.
+                    - **Datoene teller halvåpent:** et opphold som *starter* på utsjekksdagen \
+                    til et annet kolliderer ikke. Å flytte innsjekk én dag, eller korte ned \
+                    oppholdet, kan derfor være nok til å frigjøre plass.
+                    - `check_availability` viser periodens **totale** kapasitet, ikke ledige \
+                    plasser. N i denne feilmeldingen er fasiten for akkurat de datoene; bruk \
+                    `check_availability` til å finne andre åpne perioder å foreslå.
+
+                    Ikke gjenta det samme kallet uten å endre noe — svaret blir det samme.""",
             annotations =
                     @McpTool.McpAnnotations(
                             title = "Opprett booking",

@@ -515,4 +515,187 @@ class BookingToolsTest {
                 tools.listBookings(BookingStatus.PENDING),
                 tools.listBookings(BookingStatus.PENDING));
     }
+
+    // --- T-11 · kapasitetsgrenser -------------------------------------------------------
+    //
+    // Regelen ligger i BookingService/BookingRepository og er ikke skrevet her; testene under
+    // pinner ned *hvordan* den regner, siden det er det verktøyets description lover modellen.
+    // Grensetilfellene som allerede er dekket over (én over grensen, hele kapasiteten i ett
+    // kall, ikke-overlappende datoer) gjentas ikke.
+
+    /** Kort skrivemåte for et opphold på Kyoto i oktober 2026. */
+    private Booking book(String navn, int fraDag, int tilDag, int reisende) {
+        return tools.createBooking(
+                navn,
+                KYOTO,
+                LocalDate.of(2026, 10, fraDag),
+                LocalDate.of(2026, 10, tilDag),
+                reisende);
+    }
+
+    private String kapasitetsfeil(String navn, int fraDag, int tilDag, int reisende) {
+        return assertThrows(
+                        ValidationException.class, () -> book(navn, fraDag, tilDag, reisende))
+                .getMessage();
+    }
+
+    /**
+     * Grensen nås i flere steg, ikke i ett kall: 2 + 1 = 3 går gjennom, den fjerde plassen ikke.
+     * Sammenligningen {@code numTravelers > remaining} er altså inklusiv — akkurat på grensen er
+     * lovlig, én over er det ikke.
+     */
+    @Test
+    void fillsTheCapacityInStepsAndRejectsOnlyTheRequestThatTipsItOver() {
+        book("Først", 5, 8, 2);
+
+        Booking siste = book("Akkurat på grensen", 6, 9, 1); // 2 + 1 = 3 = kapasiteten
+        assertEquals(BookingStatus.PENDING, siste.status());
+
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 1 forespurt",
+                kapasitetsfeil("Én for sent", 7, 10, 1));
+    }
+
+    /**
+     * Datointervallene er <b>halvåpne</b>: overlapp-predikatet er {@code start_date < to AND
+     * end_date > from}, så et opphold som starter på utsjekksdagen til et annet kolliderer ikke.
+     * Det er nettopp derfor {@code description} kan foreslå «flytt innsjekk én dag».
+     */
+    @Test
+    void aStayStartingOnAnothersCheckoutDayDoesNotCountAgainstTheSameSeats() {
+        book("Første uke", 5, 8, 3); // hele kapasiteten, 5.–8. oktober
+
+        // Én dag inn i det andre oppholdet: overlapper, og da er det fullt.
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 1 forespurt",
+                kapasitetsfeil("Overlapper med én natt", 7, 11, 1));
+
+        // Innsjekk nøyaktig på utsjekksdagen: ingen overlapp, full kapasitet igjen.
+        assertEquals(BookingStatus.PENDING, book("Rett etterpå", 8, 11, 3).status());
+    }
+
+    /**
+     * {@code status <> 'CANCELLED'} i {@code sumActiveTravelers} er hele mekanismen bak T-12:
+     * plassene frigjøres i det statusen settes, uten at raden slettes. Her gjøres kanselleringen
+     * med {@code update_booking_status} (T-09) — {@code cancel_booking} hører til T-12.
+     */
+    @Test
+    void cancelledBookingsStopCountingAgainstTheCapacity() {
+        long fullBooking = book("Fyller opp", 5, 8, 3).id();
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 2 forespurt",
+                kapasitetsfeil("Kommer for sent", 6, 9, 2));
+
+        tools.updateBookingStatus(fullBooking, BookingStatus.CANCELLED);
+
+        assertEquals(BookingStatus.PENDING, book("Kommer for sent", 6, 9, 2).status());
+        // Raden er ikke borte — den teller bare ikke lenger med.
+        assertEquals(BookingStatus.CANCELLED, tools.getBooking(fullBooking).status());
+    }
+
+    /**
+     * Motstykket: alle de fire andre statusene teller likt. En {@code COMPLETED} booking holder
+     * altså fortsatt på plassene sine i perioden — bare {@code CANCELLED} slipper dem.
+     */
+    @Test
+    void everyStatusExceptCancelledKeepsHoldingItsSeats() {
+        long id = book("Går gjennom livssyklusen", 5, 8, 3).id();
+
+        for (BookingStatus status :
+                List.of(BookingStatus.CONFIRMED, BookingStatus.PAID, BookingStatus.COMPLETED)) {
+            tools.updateBookingStatus(id, status);
+            assertEquals(
+                    "Ikke nok kapasitet i perioden: 0 ledige plasser, 1 forespurt",
+                    kapasitetsfeil("Prøver mens status er " + status, 6, 9, 1),
+                    "status " + status + " skal fortsatt beslaglegge plassene");
+        }
+    }
+
+    /**
+     * Summen tas over <b>hele</b> det forespurte vinduet, ikke per dag. To bookinger med luft
+     * mellom seg legges derfor sammen så snart ett opphold spenner over begge — selv om ingen
+     * enkeltdag ville sprukket. Regelen er altså konservativ: den slipper aldri gjennom en
+     * overbooket dag, men kan avvise et opphold som strengt tatt hadde fått plass.
+     *
+     * <p>Samtidig vises {@code Math.max(remaining, 0)} i meldingen: 2 + 2 mot en kapasitet på 3
+     * gir {@code remaining = -1}, men modellen får «0 ledige plasser».
+     */
+    @Test
+    void theSumCoversTheWholeRequestedWindowAndTheMessageNeverGoesNegative() {
+        book("Tidlig i uka", 20, 22, 2);
+        book("Sent i uka", 26, 28, 2);
+
+        // 21.–27. overlapper begge. Ingen enkeltdag ville hatt mer enn 3 reisende (2 + 1),
+        // men summen over vinduet er 4 — altså -1 ledige, klippet til 0 i meldingen.
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 1 forespurt",
+                kapasitetsfeil("Spenner over begge", 21, 27, 1));
+
+        // Et kortere opphold i luften mellom dem går derimot fint.
+        assertEquals(BookingStatus.PENDING, book("I luften mellom", 23, 25, 3).status());
+    }
+
+    /** Kapasiteten er per reisemål: et annet reisemål på nøyaktig samme datoer er upåvirket. */
+    @Test
+    void capacityIsCountedPerDestination() {
+        book("Fyller Kyoto", 5, 8, 3);
+
+        // Lofoten (id 1) er åpent 2026-09-01→10-31 med kapasitet 6 og uten sesongpris.
+        Booking lofoten = tools.createBooking(
+                "Fyller Lofoten",
+                1L,
+                LocalDate.of(2026, 10, 5),
+                LocalDate.of(2026, 10, 8),
+                6);
+        assertEquals(BookingStatus.PENDING, lofoten.status());
+        assertEquals(33300.0, lofoten.totalPrice()); // 1850 × 3 netter × 6 reisende
+
+        // …og Kyoto er fortsatt fullt, uten at Lofoten-bookingen telte med noe sted.
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 1 forespurt",
+                kapasitetsfeil("Prøver Kyoto igjen", 5, 8, 1));
+    }
+
+    /**
+     * Flere {@code availability}-rader summeres <b>ikke</b>. {@code findCovering} krever at
+     * <em>én</em> rad dekker hele oppholdet, så et opphold over skjøten mellom to perioder
+     * avvises før kapasiteten i det hele tatt regnes ut — selv når begge periodene er åpne og
+     * har ledig plass. Feilen er derfor «Ingen tilgjengelig periode dekker …», ikke en
+     * kapasitetsfeil.
+     */
+    @Test
+    void aStayCrossingTheSeamBetweenTwoAvailabilityPeriodsIsRejectedBeforeCapacityIsCounted() {
+        // Lofoten har to tilstøtende perioder: 07-01→08-31 (sesongpris 2200) og 09-01→10-31.
+        assertEquals(
+                "Ingen tilgjengelig periode dekker 2026-08-30 til 2026-09-02",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.createBooking(
+                                        "Over skjøten",
+                                        1L,
+                                        LocalDate.of(2026, 8, 30),
+                                        LocalDate.of(2026, 9, 2),
+                                        2))
+                        .getMessage());
+
+        // Begge sidene av skjøten er åpne hver for seg — det er bare oppholdet på tvers som ikke går.
+        assertEquals(
+                6600.0, // sesongpris 2200 × 1 natt × 3 reisende
+                tools.createBooking(
+                                "Før skjøten",
+                                1L,
+                                LocalDate.of(2026, 8, 30),
+                                LocalDate.of(2026, 8, 31),
+                                3)
+                        .totalPrice());
+        assertEquals(
+                5550.0, // ordinær pris 1850 × 1 natt × 3 reisende
+                tools.createBooking(
+                                "Etter skjøten",
+                                1L,
+                                LocalDate.of(2026, 9, 1),
+                                LocalDate.of(2026, 9, 2),
+                                3)
+                        .totalPrice());
+    }
 }

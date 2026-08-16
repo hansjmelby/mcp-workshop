@@ -21,7 +21,7 @@ etterpå. Én commit per oppgave.
 | T-08 | `get_booking` | ✅ | `get_booking` lagt til i `tools/BookingTools.java` (første **lesende** verktøy i en blandet klasse — egne hint per metode; én obligatorisk `long id`; `Booking` returneres uendret); 4 nye tester i `tools/BookingToolsTest.java` ([se under](#t-08--get_booking)) |
 | T-09 | `update_booking_status` | ✅ | `update_booking_status` lagt til i `tools/BookingTools.java` (første **enum** over MCP-grensen — `BookingStatus` gir `"enum":[…]` i skjemaet, og ugyldige verdier stoppes av skjemavalideringen; første verktøy med `destructiveHint = true` + `idempotentHint = true`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-09--update_booking_status)) |
 | T-10 | `list_bookings` | ✅ | `list_bookings` lagt til i `tools/BookingTools.java` (første **valgfrie enum** — `"enum":[…]` i skjemaet *og* tomt `required`; bar `List<Booking>` som svar, ingen konvolutt; krysshenvisning begge veier mot `get_booking`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-10--list_bookings)) |
-| T-11 | Avvis overbooking | ⬜ | — |
+| T-11 | Avvis overbooking | ✅ | Verifikasjonsoppgave — ingen ny forretningslogikk. Kapasitetsregnestykket kartlagt og verifisert gjennom protokollen (fyll opp → én over → kansellering frigjør); `description` på `create_booking` utvidet med hva modellen skal gjøre med «N ledige plasser», og `check_availability` presisert (`capacity` er total, ikke ledig); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-11--avvis-overbooking)) |
 | T-12 | `cancel_booking` | ⬜ | — |
 | T-13 | Destinasjoner som Resource | ⬜ | — |
 | T-14 | Bookinger som Resource | ⬜ | — |
@@ -51,7 +51,8 @@ etterpå. Én commit per oppgave.
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
   `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
-  `BookingTools` (T-07 ✅, T-08 ✅, T-09 ✅, T-10 ✅, T-11–T-12). `AboutTool` (entall) står igjen som
+  `BookingTools` (T-07 ✅, T-08 ✅, T-09 ✅, T-10 ✅, T-11 ✅ — ingen nytt verktøy, bare
+  `description`, T-12). `AboutTool` (entall) står igjen som
   eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
@@ -1631,5 +1632,148 @@ siden av hverandre: begge er `isError:false` med `[]`, og de er umulige å skill
 å se argumentene. Det er nøyaktig det beskrivelsen kompenserer for.
 
 > **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07–T-09. Fila ble kopiert før
+> kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptet lå
+> i en scratchpad-katalog utenfor repoet.
+
+### T-11 · Avvis overbooking
+
+**En verifikasjonsoppgave, ikke en implementasjonsoppgave.** Regelen ligger allerede i
+`BookingService.createBooking(...)`, og akseptkriteriet («summen av aktive bookinger + ny booking
+≤ kapasitet») er oppfylt fra før. Jobben her var å kartlegge *nøyaktig* hvordan den regner, bevise
+gjennom protokollen at MCP-laget formidler den, og tette hullene i formidlingen. **Ingen ny
+forretningslogikk, ingen ny SQL, ingen `try/catch` i verktøylaget.**
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | `description` på `create_booking` utvidet med hva modellen skal gjøre med kapasitetsfeilen; javadoc peker på hvor regelen faktisk bor |
+| `src/main/java/no/computas/vacationmcp/tools/AvailabilityTools.java` | `description` på `check_availability` presisert: `capacity` er periodens **totale** antall plasser, ikke ledige |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | 7 nye tester som pinner ned grensetilfellene |
+
+#### Kapasitetsregnestykket, presist
+
+Tre kodelinjer i `BookingService.createBooking(...)` er hele regelen:
+
+```java
+Availability period = pricing.findCoveringPeriod(destinationId, from, to);
+int alreadyBooked = bookings.sumActiveTravelers(destinationId, from, to);
+int remaining = period.capacity() - alreadyBooked;
+if (numTravelers > remaining) { throw new ValidationException(...); }
+```
+
+og SQL-en bak `sumActiveTravelers` er den som bestemmer *hvem* som teller:
+
+```sql
+SELECT COALESCE(SUM(num_travelers), 0) FROM bookings
+WHERE destination_id = ? AND status <> 'CANCELLED' AND start_date < ? /* to */ AND end_date > ? /* from */
+```
+
+Punkt for punkt — dette er fasiten deltakerne skal kunne sjekke seg mot:
+
+1. **Kapasiteten kommer fra én enkelt `availability`-rad.** `findCovering` er
+   `start_date <= from AND end_date >= to ORDER BY start_date LIMIT 1`, altså raden som dekker
+   **hele** oppholdet. Kapasitet **summeres aldri på tvers av rader**, og et opphold som krysser
+   skjøten mellom to tilstøtende perioder avvises *før* kapasiteten regnes ut — med «Ingen
+   tilgjengelig periode dekker …», ikke en kapasitetsfeil. Lofoten (id 1) har to slike perioder
+   (`07-01→08-31` og `09-01→10-31`), og 2026-08-30→2026-09-02 faller mellom to stoler selv om
+   begge sidene er åpne og ledige. Skulle to rader overlappe i tid, vinner den med lavest
+   `start_date` (`LIMIT 1`) — det forekommer ikke i `data.sql`.
+2. **Hvilke bookinger teller:** alle på **samme reisemål** som overlapper datoene, i **alle
+   statuser unntatt `CANCELLED`**. `PENDING`, `CONFIRMED`, `PAID` *og* `COMPLETED` holder like
+   godt på plassene sine; det er bare `CANCELLED` som slipper dem — og det er hele mekanismen
+   T-12 lener seg på. Summeringen bryr seg **ikke** om hvilken `availability`-rad de bookingene
+   hørte til; den filtrerer bare på `destination_id` og datooverlapp. (Uproblematisk her, siden
+   periodene i `data.sql` ikke overlapper hverandre: to bookinger i ulike perioder kan uansett
+   ikke overlappe i dato.)
+3. **Overlapp er halvåpent:** `start_date < to AND end_date > from`, med *strenge* ulikheter.
+   Utsjekksdagen er fri — et opphold som **starter** på utsjekksdagen til et annet kolliderer
+   ikke. Delvis overlapp teller derimot fullt ut: én felles natt er nok til at *hele*
+   `num_travelers` fra den andre bookingen trekkes fra.
+4. **Summen tas over hele det forespurte vinduet, ikke per dag.** Regelen er derfor
+   **konservativ**: den slipper aldri gjennom en dag med flere reisende enn kapasiteten (enhver
+   booking som dekker en dag i vinduet er med i summen), men den kan avvise et opphold som
+   strengt tatt hadde fått plass. Kyoto (kapasitet 3) med bookinger 20.–22. (2 reisende) og
+   26.–28. (2 reisende): et opphold 21.–27. for **1** reisende avvises, selv om ingen enkeltdag
+   ville hatt mer enn 3. Verifisert både i test og gjennom protokollen.
+5. **Grensen er inklusiv.** `numTravelers > remaining` avviser, så *akkurat* på grensen er
+   lovlig. `remaining` kan bli negativ (punkt 4), men meldingen viser
+   `Math.max(remaining, 0)` — modellen ser aldri «-1 ledige plasser».
+6. **Sjekken er ikke transaksjonell.** `sumActiveTravelers` og `insert` er to separate spørringer
+   uten lås, så to samtidige kall kan i teorien begge se plass. Irrelevant for en stdio-server med
+   én klient, men verdt å vite hvis noen tar med seg mønsteret videre.
+
+#### Gjennom protokollen — den faktiske feil-JSON-en
+
+Røyktest mot `build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar` (håndtrykk som i T-00, deretter
+13 `tools/call`). Reisemålet er **Kyoto Machiya (id 3)** — 1600/natt, én periode
+`2026-10-01→2026-11-30` uten sesongpris og med **kapasitet 3**, den laveste i `data.sql` og derfor
+den som er raskest å fylle opp.
+
+Feilmeldingen klienten faktisk får, ordrett:
+
+```jsonc
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"Error invoking method: createBooking\nIkke nok kapasitet i perioden: 1 ledige plasser, 2 forespurt"}],"isError":true}}
+```
+
+Hele sekvensen, i rekkefølge:
+
+| # | Kall (alle mot `destinationId: 3` der ikke annet står) | Resultat |
+|---|--------------------------------------------------------|----------|
+| 1 | `create_booking` Ola, 10-05→10-08, **2** | `isError:false`, `id: 1` — 2 av 3 plasser tatt |
+| 2 | `create_booking` Kari, 10-06→10-09, **2** | `isError:true`: **`1 ledige plasser, 2 forespurt`** — delvis overlapp teller fullt |
+| 3 | `create_booking` Kari, 10-06→10-09, **1** | `isError:false`, `id: 2` — nøyaktig på grensen (2 + 1 = 3) går gjennom |
+| 4 | `create_booking` Per, 10-07→10-10, **1** | `isError:true`: **`0 ledige plasser, 1 forespurt`** — én over grensen |
+| 5 | `check_availability` 10-07→10-10 | `isError:false`, `"capacity":3` — **totalkapasiteten**, selv om 0 er ledige |
+| 6 | `update_booking_status` `{"id":1,"status":"CANCELLED"}` | `isError:false` — frigjør 2 plasser |
+| 7 | `create_booking` Per, 10-07→10-10, **1** (kall 4 om igjen) | `isError:false`, `id: 3` — kansellering frigjorde plassen |
+| 8 | `create_booking` Nina, 10-09→10-13, **3** | `isError:true`: `2 ledige plasser, 3 forespurt` — én natt overlapp med id 3 |
+| 9 | `create_booking` Nina, **10-10**→10-13, **3** | `isError:false`, `id: 4` — innsjekk på utsjekksdagen kolliderer ikke |
+| 10–11 | `create_booking` 10-20→10-22 **2**, og 10-26→10-28 **2** | `isError:false`, `id: 5` og `id: 6` |
+| 12 | `create_booking` 10-21→10-27, **1** | `isError:true`: `0 ledige plasser, 1 forespurt` — summen over hele vinduet er 4 (`remaining = -1`, klippet til 0) |
+| 13 | `create_booking` **Lofoten (id 1)**, 08-30→09-02, 2 | `isError:true`: `Ingen tilgjengelig periode dekker 2026-08-30 til 2026-09-02` |
+
+Rad 5 og 12 er de to observasjonene som førte til endringer; rad 2/4/7/9/13 er akseptkriteriet.
+
+#### Er meldingen god nok for en LLM?
+
+Meldingen er **handlingsbar som den er**: den oppgir både `N` (ledige) og `M` (forespurt), så
+modellen kan foreslå et lavere antall uten et eneste nytt verktøykall. Ingen stacktrace, `isError:
+true` i et `result` (mønsteret fra T-04), og innpakningslinja `Error invoking method: createBooking`
+er den samme kosmetiske støyen som ellers. Men tre hull i *formidlingen* ble avdekket, og de er
+tettet i `description` — ikke i logikken:
+
+1. **`N = 0` gjør «foreslå færre reisende» meningsløst.** Den gamle teksten sa «foreslå færre
+   reisende eller andre datoer» uten å skille. Nå står regelen eksplisitt: `N ≥ 1` → book N eller
+   færre på samme datoer; `N = 0` → det hjelper ikke, foreslå andre datoer eller et annet reisemål.
+2. **`check_availability` svarer på noe annet enn modellen tror.** Rad 5 over: `capacity: 3` mens
+   0 plasser er ledige. Den gamle teksten sendte modellen dit for å «se periodenes kapasitet», som
+   inviterer til nettopp den feilslutningen. Nå sier `create_booking` at `N` er fasiten for de
+   datoene og at `check_availability` er til for å finne *andre* åpne perioder — og
+   `check_availability` sier selv at `capacity` er totalen, ikke ledige plasser, med henvisning til
+   hvor det ekte tallet kommer fra.
+3. **Halvåpen-regelen var usynlig.** At utsjekksdagen er fri (rad 8 vs. 9) er den billigste
+   løsningen når det er nesten fullt, men ingenting i katalogen fortalte modellen det. Nå står det
+   i beskrivelsen, sammen med at et kortere opphold kan overlappe færre bookinger (punkt 4 over).
+
+I tillegg presiserer beskrivelsen at **ingenting lagres** når kapasiteten sprekker (så et retry
+ikke er farlig, bare nytteløst uten endring), og at skjøten mellom to perioder gir en *annen*
+feilmelding enn kapasitet. `annotations` er uendret — T-11 legger ikke til et verktøy.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 83 tester (76 fra før + 7 nye i `BookingToolsTest`, som nå har
+35). De nye dekker: grensen nådd i **flere steg** (2 + 1 = 3 går gjennom, den fjerde plassen ikke);
+innsjekk på en annen bookings utsjekksdag (ingen kollisjon) mot én dag tidligere (kollisjon);
+at `CANCELLED` frigjør plassene mens raden blir liggende; at `CONFIRMED`/`PAID`/`COMPLETED`
+fortsatt holder på dem; at summen tas over hele vinduet (to bookinger med luft mellom seg, ingen
+enkeltdag over kapasitet, likevel avvist) og at `Math.max(remaining, 0)` skjuler det negative
+tallet; at kapasiteten er per reisemål (Lofoten fullt påvirker ikke Kyoto); og at et opphold over
+skjøten mellom to `availability`-rader avvises før kapasiteten regnes ut, mens begge sidene hver
+for seg går fint. Grensetilfeller som allerede var dekket i T-07 (én over grensen, hele kapasiteten
+i ett kall, ikke-overlappende datoer) er **ikke** duplisert.
+
+**2. Gjennom protokollen** — tabellen over. Stderr bekreftet som vanlig registreringen:
+`Tilgjengelige MCP-tools (9): [about_application, check_availability, create_booking, get_booking, list_bookings, update_booking_status, list_destinations, search_destinations, get_quote]`.
+
+> **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07–T-10. Fila ble kopiert før
 > kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptet lå
 > i en scratchpad-katalog utenfor repoet.

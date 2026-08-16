@@ -68,8 +68,9 @@ public class AvailabilityTools {
             description =
                     """
                     Viser hvilke tilgjengelighetsperioder et reisemål har som overlapper \
-                    datointervallet du spør om, med kapasitet (maks antall reisende i \
-                    perioden) og eventuell sesongpris per natt. Bruk verktøyet når brukeren \
+                    datointervallet du spør om, med kapasitet (periodens **totale** antall \
+                    plasser, ikke hvor mange som er ledige) og eventuell sesongpris per natt. \
+                    Bruk verktøyet når brukeren \
                     spør «er det ledig?», vil vite når på året et reisemål er åpent, eller \
                     før du foreslår konkrete datoer. Id-en får du fra `list_destinations` \
                     eller `search_destinations`.
@@ -83,9 +84,13 @@ public class AvailabilityTools {
                     reisemåls-verktøyene hvis du er i tvil.
 
                     En treffende periode betyr bare at periodene **overlapper**, ikke at \
-                    hele oppholdet er dekket eller at det er plass igjen. `seasonPrice` er \
-                    null når reisemålets ordinære pris per natt gjelder. Bruk `get_quote` \
-                    for å få bekreftet at datoene faktisk kan bookes og hva de koster.""",
+                    hele oppholdet er dekket eller at det er plass igjen: `capacity` er \
+                    periodens totale antall plasser, og verktøyet trekker ikke fra bookinger \
+                    som allerede ligger inne. Hvor mange plasser som faktisk er ledige på \
+                    konkrete datoer, får du bare fra kapasitetsfeilen til `create_booking` \
+                    («N ledige plasser»). `seasonPrice` er null når reisemålets ordinære pris \
+                    per natt gjelder. Bruk `get_quote` for å få bekreftet at datoene faktisk \
+                    kan bookes og hva de koster.""",
             annotations =
                     @McpTool.McpAnnotations(
                             title = "Sjekk tilgjengelighet",
