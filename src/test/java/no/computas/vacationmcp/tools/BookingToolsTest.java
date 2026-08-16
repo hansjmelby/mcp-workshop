@@ -189,4 +189,60 @@ class BookingToolsTest {
         assertEquals(BookingStatus.PENDING, senere.status());
         assertEquals(14400.0, senere.totalPrice()); // 1600 × 3 netter × 3 reisende
     }
+
+    // --- T-08 · get_booking -------------------------------------------------------------
+
+    /**
+     * Alle åtte feltene sjekkes med vilje: {@code get_booking} er verktøyet en modell bruker for
+     * å oppsummere en booking for brukeren, så et felt som faller ut på veien er en ekte feil,
+     * ikke en detalj. Recorden går uendret fra tjenesten til tekstblokken (T-03-konvensjonen).
+     */
+    @Test
+    void getsANewlyCreatedBookingWithAllFields() {
+        Booking opprettet = tools.createBooking("Ola Nordmann", KYOTO, FROM, TO, 2);
+
+        Booking hentet = tools.getBooking(opprettet.id());
+
+        assertEquals(opprettet.id(), hentet.id());
+        assertEquals("Ola Nordmann", hentet.customerName());
+        assertEquals(KYOTO, hentet.destinationId());
+        assertEquals(FROM, hentet.startDate());
+        assertEquals(TO, hentet.endDate());
+        assertEquals(2, hentet.numTravelers());
+        assertEquals(9600.0, hentet.totalPrice()); // 1600 × 3 netter × 2 reisende
+        assertEquals(BookingStatus.PENDING, hentet.status());
+        // …og som helhet: oppslaget gir nøyaktig det create_booking returnerte.
+        assertEquals(opprettet, hentet);
+    }
+
+    /** {@code idempotentHint = true} i praksis: samme id, samme svar. */
+    @Test
+    void repeatedLookupsReturnTheSameBooking() {
+        long id = tools.createBooking("Kari", KYOTO, FROM, TO, 1).id();
+
+        assertEquals(tools.getBooking(id), tools.getBooking(id));
+    }
+
+    /**
+     * Ukjent id skal gi {@code NotFoundException} med en melding modellen kan bruke — den er
+     * ordrett teksten klienten ser etter innpakningslinja fra Spring AI (se T-04).
+     */
+    @Test
+    void rejectsUnknownBookingId() {
+        NotFoundException feil =
+                assertThrows(NotFoundException.class, () -> tools.getBooking(999L));
+
+        assertEquals("Fant ingen booking med id 999", feil.getMessage());
+    }
+
+    /** En slettet/aldri-opprettet id er samme sak: ingen tom respons, men en feil. */
+    @Test
+    void rejectsLookupAfterTheBookingsAreGone() {
+        long id = tools.createBooking("Ola", KYOTO, FROM, TO, 1).id();
+        jdbc.update("DELETE FROM bookings");
+
+        assertEquals(
+                "Fant ingen booking med id " + id,
+                assertThrows(NotFoundException.class, () -> tools.getBooking(id)).getMessage());
+    }
 }

@@ -18,7 +18,7 @@ etterpå. Én commit per oppgave.
 | T-05 | `check_availability` | ✅ | `tools/AvailabilityTools.java` → verktøyet `check_availability` (`LocalDate`-parametere + `AvailabilityResult`-konvolutt); felles datobeslutning etablert; test `tools/AvailabilityToolsTest.java` med 9 tester ([se under](#t-05--check_availability)) |
 | T-06 | `get_quote` | ✅ | `tools/PricingTools.java` → verktøyet `get_quote` (fire obligatoriske parametere — første ikke-tomme `required`; `Quote` returneres uendret); test `tools/PricingToolsTest.java` med 13 tester ([se under](#t-06--get_quote)) |
 | T-07 | `create_booking` | ✅ | `tools/BookingTools.java` → verktøyet `create_booking` (første **skrivende** verktøy — egne `annotations`; fem obligatoriske parametere; `Booking` returneres uendret); test `tools/BookingToolsTest.java` med 10 tester ([se under](#t-07--create_booking)) |
-| T-08 | `get_booking` | ⬜ | — |
+| T-08 | `get_booking` | ✅ | `get_booking` lagt til i `tools/BookingTools.java` (første **lesende** verktøy i en blandet klasse — egne hint per metode; én obligatorisk `long id`; `Booking` returneres uendret); 4 nye tester i `tools/BookingToolsTest.java` ([se under](#t-08--get_booking)) |
 | T-09 | `update_booking_status` | ⬜ | — |
 | T-10 | `list_bookings` | ⬜ | — |
 | T-11 | Avvis overbooking | ⬜ | — |
@@ -68,6 +68,11 @@ etterpå. Én commit per oppgave.
   begrunnelsen hint for hint. Merk at `destructiveHint` og `idempotentHint` bare er
   meningsbærende når `readOnlyHint == false`; vi setter dem likevel eksplisitt for å unngå at
   Spring AI sin default (`destructiveHint = true`) står igjen i katalogen.
+  **Hintene hører til metoden, ikke klassen** (vist i T-08): `BookingTools` inneholder både det
+  skrivende `create_booking` og det lesende `get_booking`, og hver `@McpTool` har sin egen
+  `annotations`-blokk. I `tools/list` er hvert verktøy uansett sin egen oppføring — «skrivende
+  klasse» er ikke et begrep hosten kjenner. Vurder derfor alle fire hintene på nytt for hver
+  metode, og la aldri et lesende verktøy arve nabometodens `readOnlyHint = false`.
 - **`description` er prompt-engineering**: si *hva* verktøyet gir, *når* modellen skal velge
   det framfor naboverktøyet, hvilke felt som kommer tilbake, og hvilke forbehold som gjelder.
   Legg til krysshenvisning begge veier når nabo-verktøyet finnes (gjort i T-04:
@@ -1137,3 +1142,131 @@ forespurt.
 > serveren. Fila ble derfor kopiert før kjøringen og lagt tilbake etterpå
 > (`select count(*) from bookings` er 0 igjen). Alternativet er å slette `vacation.db` og la
 > `schema.sql`/`data.sql` seede den på nytt ved oppstart.
+
+### T-08 · `get_booking`
+
+Andre verktøy i `BookingTools`, og det første **lesende** verktøyet i en klasse som allerede
+inneholder et skrivende. Ingen nye filer:
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | nytt `@McpTool(name = "get_booking")` → `BookingService.get(id)`; klasse-javadoc utvidet med «hint hører til metoden, ikke klassen» |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | 4 nye tester (alle felt etter oppslag, gjentatt oppslag, ukjent id, id som er borte) |
+
+Metodekroppen er igjen **én linje**: `return bookings.get(id);`. Tjenesten gjør oppslaget mot
+`BookingRepository.findById(...)` og kaster `NotFoundException` hvis `Optional`-en er tom, så
+verktøyet har verken null-sjekk eller `try/catch`. `Booking` returneres uendret etter
+T-03-konvensjonen — recorden bærer allerede `status` og `totalPrice`, altså alt en modell
+trenger for å oppsummere bookingen, og det finnes ingenting å mappe.
+
+#### Hint settes per metode, ikke per klasse
+
+Dette er poenget oppgaven egentlig handler om. `BookingTools` er nå blandet, og de to
+verktøyene i den har **motsatte** hint:
+
+```jsonc
+// create_booking (T-07)                        // get_booking (T-08)
+"annotations": {                                // "annotations": {
+  "title": "Opprett booking",                   //   "title": "Hent booking",
+  "readOnlyHint": false,                        //   "readOnlyHint": true,
+  "destructiveHint": false,                     //   "destructiveHint": false,
+  "idempotentHint": false,                      //   "idempotentHint": true,
+  "openWorldHint": false                        //   "openWorldHint": false
+}                                               // }
+```
+
+Begge blokkene er hentet ordrett fra det samme `tools/list`-svaret. `annotations` er et
+attributt på `@McpTool`, altså på **metoden**, og i protokollen er hvert verktøy sin egen
+oppføring i `tools`-arrayet — hosten ser aldri hvilken Java-klasse de kom fra. At vi samler
+booking-verktøyene i én klasse er ren kodeorganisering (se «Struktur for verktøyklasser»); det
+gir ingen felles «skrivende» sikkerhetsprofil. Motsatt vei er fella tydeligere: hadde
+`get_booking` arvet naboen sin `readOnlyHint = false`, ville en host som skiller auto-approve
+fra bekreftelseskrevende kall bedt brukeren om å godkjenne et rent `SELECT`, og
+readOnly-hintets verdi som signal ville forsvunnet. Konkret for de to som snus tilbake:
+
+- **`readOnlyHint = true`** — et oppslag leser én rad og endrer ingenting.
+- **`idempotentHint = true`** — samme id gir samme svar. Formelt sier hintet at *gjentatte kall
+  ikke gir ytterligere effekt*, og et `SELECT` har ingen effekt i det hele tatt. At svaret kan
+  endre seg hvis `update_booking_status` (T-09) kjører imellom, er irrelevant for hintet — det
+  handler om verktøyets egne bivirkninger, ikke om at verden står stille.
+
+`destructiveHint = false` og `openWorldHint = false` er uendret fra `create_booking`, men av
+enda mer opplagte grunner: ingenting slettes eller overskrives, og alt ligger i vår egen
+SQLite-base.
+
+#### `inputSchema`: én obligatorisk parameter
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {"type": "integer", "format": "int64", "description": "Id-en til bookingen, slik den kom i `id`-feltet fra `create_booking`. Et positivt heltall. En ukjent id gir en feilmelding, ikke et tomt svar — ikke gjett."}
+  },
+  "required": ["id"]
+}
+```
+
+Primitiv `long` er riktig her av samme grunn som i T-06/T-07: verdien er obligatorisk, så det
+finnes ingen «ikke oppgitt» som må overleve som `null`. Skjemavalideringen håndhever `required`
+før metoden kalles — et kall med `{}` ga
+`Tool (get_booking) input validation failed: … [: påkrevd egenskap 'id' ikke funnet]`.
+
+#### `NotFoundException` for ukjent id — den faktiske meldingen
+
+Mønsteret fra T-04 gjelder uendret: ingen `try/catch`, exception-en får boble. Verifisert
+gjennom protokollen med `{"id":999}`:
+
+```jsonc
+{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"Error invoking method: getBooking\nFant ingen booking med id 999"}],"isError":true}}
+```
+
+Altså `result` med `isError: true` (ikke JSON-RPC `error`), ingen stacktrace, og to linjer:
+Spring AI sin innpakning `Error invoking method: getBooking` + `BookingService` sin egen
+melding `Fant ingen booking med id 999`. Meldingen navngir id-en, så modellen ser hvilket
+oppslag som feilet uten å gjette. Verktøybeskrivelsen siterer den ordrett og sier hva modellen
+skal gjøre: spør brukeren om referansen, ikke prøv deg fram med flere id-er.
+
+#### Krysshenvisningen
+
+`description` peker på `create_booking` som kilden til `id`-en (og sier eksplisitt at
+`get_booking` *ikke* oppretter noe), og på `list_destinations` for å oversette `destinationId`
+til et navn. Den nevner med vilje **ikke** `list_bookings` (T-10): den finnes ikke i `tools/list`
+ennå, og en modell som leser «bruk `list_bookings` for å finne id-en» ville forsøkt et kall som
+ikke eksisterer. Krysshenvisningen begge veier legges inn når T-10 faktisk lander — samme
+rekkefølge som T-03/T-04 gjorde det.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 62 tester (58 fra før + 4 nye). De nye dekker: oppslag av en
+nyopprettet booking der **alle åtte feltene** sjekkes enkeltvis og recorden i tillegg
+sammenlignes som helhet med det `create_booking` returnerte; to identiske oppslag som gir
+identisk svar (`idempotentHint = true` i praksis); ukjent id (999) med **ordrett** melding; og
+en id som fantes, men er borte etter `DELETE FROM bookings` — også der en feil, ikke et tomt
+svar. Samme opprydding som resten av klassen (`DELETE FROM bookings` i `@BeforeEach` +
+`@AfterEach`).
+
+**2. Gjennom protokollen** — håndtrykk som i T-00, deretter `tools/list` og fire `tools/call`
+mot den nybygde jar-en. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (7): [about_application, check_availability, create_booking, get_booking, list_destinations, search_destinations, get_quote]`.
+
+| Kall | Resultat |
+|------|----------|
+| `create_booking` `{"customerName":"Ola Nordmann","destinationId":3,"from":"2026-10-05","to":"2026-10-08","numTravelers":2}` | `isError:false`, `id: 1`, `status: PENDING`, `totalPrice: 9600.0` |
+| `get_booking` `{"id":1}` | `isError:false` — **byte for byte samme JSON** som `create_booking` returnerte |
+| `get_booking` `{"id":999}` | `isError:true`: `Error invoking method: getBooking` / `Fant ingen booking med id 999` |
+| `get_booking` `{}` | `isError:true`: skjemavalideringen, `påkrevd egenskap 'id' ikke funnet` |
+
+Den hentede bookingen, ordrett fra tekstblokken:
+
+```json
+{"id":1,"customerName":"Ola Nordmann","destinationId":3,"startDate":"2026-10-05","endDate":"2026-10-08","numTravelers":2,"totalPrice":9600.0,"status":"PENDING"}
+```
+
+At de to svarene er identiske er selve akseptkriteriet: bookingen som ble lagret, er den som
+kommer tilbake — inkludert `startDate`/`endDate` som `"2026-10-05"`-strenger gjennom
+`LocalDate`-serialiseringen fra T-05.
+
+> **Røyktesten skriver til `vacation.db` i prosjektroten**, akkurat som i T-07. Fila ble kopiert
+> før kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen).
+> Hjelpeskriptet lå i en scratchpad-katalog utenfor repoet.

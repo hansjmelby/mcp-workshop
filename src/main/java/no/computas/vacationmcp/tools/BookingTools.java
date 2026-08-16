@@ -27,6 +27,15 @@ import org.springframework.stereotype.Component;
  * {@code annotations} er satt deretter — se javadoc-en på metoden og T-07-seksjonen i
  * {@code SOLUTION-STATUS.md}. De lesende verktøyene sine hint
  * ({@code readOnlyHint = true, idempotentHint = true}) skal <em>ikke</em> arves hit.
+ *
+ * <p><b>Hint hører til metoden, ikke klassen.</b> Fra og med T-08 er klassen blandet:
+ * {@code get_booking} er et rent oppslag ({@code readOnlyHint = true},
+ * {@code idempotentHint = true}), mens {@code create_booking} skriver. {@code annotations}
+ * settes per {@code @McpTool}, og i protokollen er hvert verktøy sin egen oppføring i
+ * {@code tools/list} — «skrivende klasse» finnes ikke som begrep for hosten. Å samle
+ * booking-verktøyene i én klasse er derfor bare kodeorganisering (se «Struktur for
+ * verktøyklasser»); hintene må vurderes på nytt for hver eneste metode, og et lesende verktøy
+ * skal ikke arve nabometodens {@code readOnlyHint = false}.
  */
 @Component
 public class BookingTools {
@@ -146,5 +155,65 @@ public class BookingTools {
         // Ingen validering, kapasitetssjekk eller prisberegning her: BookingService gjør alt
         // tre, og kaster ValidationException/NotFoundException som får boble videre (T-04).
         return bookings.createBooking(customerName, destinationId, from, to, numTravelers);
+    }
+
+    /**
+     * Slår opp én booking ved å delegere til {@link BookingService#get(long)}, som kaster
+     * {@code NotFoundException} hvis id-en ikke finnes.
+     *
+     * <p><b>Hintene er de motsatte av nabometoden sine</b> — se klasse-javadoc-en. Et
+     * {@code SELECT} endrer ingenting, så {@code readOnlyHint = true} og
+     * {@code idempotentHint = true}; samme id gir samme svar helt til noen endrer bookingen med
+     * et annet verktøy. {@code destructiveHint = false} og {@code openWorldHint = false} som
+     * ellers (ingen data røres, alt ligger i vår egen SQLite-base). Dette er nøyaktig samme
+     * blokk som de lesende verktøyene i T-03–T-06 har, og det er meningen: hintene beskriver
+     * <em>metoden</em>, ikke klassen den tilfeldigvis bor i.
+     *
+     * <p>Svaret er hele {@link Booking}-recorden, uendret etter T-03-konvensjonen. Den bærer
+     * allerede alt en modell trenger for å oppsummere bookingen — {@code status} og
+     * {@code totalPrice} inkludert — så det finnes ingenting å mappe eller formatere her.
+     */
+    @McpTool(
+            name = "get_booking",
+            title = "Hent booking",
+            description =
+                    """
+                    Henter én booking med id-en dens, slik den ser ut i databasen akkurat nå. \
+                    Bruk verktøyet når brukeren spør om en booking hen allerede har — «hva er \
+                    status på booking 3?», «hva kostet den?», «hvilke datoer var det?» — og \
+                    alltid før du oppsummerer eller endrer en booking, så du refererer til \
+                    lagrede tall og ikke til det som ble sagt tidligere i samtalen.
+
+                    Svaret er hele bookingen: `id`, `customerName`, `destinationId`, \
+                    `startDate`, `endDate`, `numTravelers`, `totalPrice` i norske kroner og \
+                    `status` (`PENDING`, `CONFIRMED`, `PAID`, `COMPLETED` eller `CANCELLED`). \
+                    Merk at `destinationId` er en id, ikke et navn — slå den opp med \
+                    `list_destinations` hvis brukeren skal se hva reisemålet heter.
+
+                    Verktøyet **endrer ingenting** og kan trygt kalles på nytt; det oppretter \
+                    heller ingen booking. Bruk `create_booking` for å opprette en, og ta vare \
+                    på `id`-en du får tilbake derfra — den er det eneste denne oppslaget \
+                    godtar. Finnes ikke id-en, får du feilmeldingen «Fant ingen booking med id \
+                    N»; da har du sannsynligvis gjettet på et nummer. Spør brukeren om \
+                    referansen i stedet for å prøve deg fram med flere id-er.""",
+            annotations =
+                    @McpTool.McpAnnotations(
+                            title = "Hent booking",
+                            readOnlyHint = true,
+                            destructiveHint = false,
+                            idempotentHint = true,
+                            openWorldHint = false))
+    public Booking getBooking(
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Id-en til bookingen, slik den kom i `id`-feltet fra \
+                                    `create_booking`. Et positivt heltall. En ukjent id gir en \
+                                    feilmelding, ikke et tomt svar — ikke gjett.""")
+                    long id) {
+        // Ingen try/catch: NotFoundException fra tjenesten får boble ut og blir et
+        // CallToolResult med isError: true og meldingen som tekst (mønsteret fra T-04).
+        return bookings.get(id);
     }
 }
