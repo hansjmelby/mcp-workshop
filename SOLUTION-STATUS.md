@@ -10,7 +10,7 @@ etterpå. Én commit per oppgave.
 
 | Oppgave | Hva | Status | Leveranse |
 |---------|-----|--------|-----------|
-| T-00 | MCP-protokollen under panseret | ⬜ | — |
+| T-00 | MCP-protokollen under panseret | 📝 | Verifisert trace + capability-analyse + svar ([se under](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner)) |
 | T-01 | Bygg, kjør og inspiser skallet | ⬜ | — |
 | T-02 | Koble serveren til Claude | ⬜ | — |
 | T-03 | `list_destinations` | ⬜ | — |
@@ -47,3 +47,156 @@ etterpå. Én commit per oppgave.
 ## Detaljer og svar på oppgavenes spørsmål
 
 <!-- Hver agent legger til sin egen seksjon her, i rekkefølge. -->
+
+### T-00 · Se MCP-protokollen før du bruker Spring-annotasjoner
+
+Ingen kodeendring — dette er en observasjonsoppgave. Tracen under er **faktisk kjørt** mot
+`build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar` (bygget med `./gradlew bootJar`), med
+stdout og stderr fanget hver for seg, slik at JSON-RPC-linjene er rene:
+
+```bash
+{ \
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"workshop-trace","version":"1.0"}}}'; \
+  sleep 2; \
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'; \
+  sleep 1; \
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; \
+  sleep 2; \
+} | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > stdout.jsonl 2> stderr.log
+```
+
+#### Den faktiske tracen
+
+```jsonc
+// 1) klient → server: initialize (request, har id)
+//    Klienten foreslår protokollversjon og oppgir sine egne capabilities (her: ingen).
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"workshop-trace","version":"1.0"}}}
+
+// 2) server → klient: initialize-respons (samme id=1) — capability-forhandlingen
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"completions":{},"logging":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true}},"serverInfo":{"name":"vacation-booking-mcp","version":"0.0.1"}}}
+
+// 3) klient → server: notifications/initialized — ingen id, og INGEN linje kommer tilbake.
+//    Håndtrykket er ferdig; nå er det lov å kalle tools/resources/prompts.
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+// 4) klient → server: tools/list (request, id=2)
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+// 5) server → klient: verktøykatalogen med JSON Schema-kontrakten
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"about_application","title":"about_application","description":"Forklarer hva denne applikasjonen er og hva den brukes til.","inputSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[]},"annotations":{"title":"","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}}]}}
+```
+
+Stdout inneholdt **nøyaktig to linjer** — svaret på `initialize` og svaret på `tools/list`.
+Det er den enkleste mulige empiriske bekreftelsen på at en notifikasjon ikke gir respons.
+Hele Spring-oppstartsloggen (banner, Hikari, `McpServerAutoConfiguration`,
+`RegisteredToolsLogger: Tilgjengelige MCP-tools (1): [about_application]`) lå på stderr og
+forurenset ikke protokollen — akkurat slik `logback-spring.xml` er satt opp.
+
+#### Capabilities: hva serveren annonserer vs. hva skallet faktisk har
+
+Serveren annonserer fem capabilities. En ekstra sondering (samme håndtrykk, men med
+`resources/list`, `resources/templates/list`, `prompts/list` og et `tools/call`) ga:
+
+```jsonc
+{"jsonrpc":"2.0","id":2,"result":{"resources":[]}}
+{"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[]}}
+{"jsonrpc":"2.0","id":4,"result":{"prompts":[]}}
+{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"Dette er en ferie-booking MCP-server …"}],"isError":false}}
+```
+
+| Capability | Annonsert | Faktisk innhold i skallet | Kommentar |
+|------------|-----------|---------------------------|-----------|
+| `tools` | `{"listChanged":true}` | 1 verktøy: `about_application` | Eneste capability med reelt innhold i dag. `listChanged` = serveren lover å varsle hvis lista endrer seg. |
+| `resources` | `{"subscribe":false,"listChanged":true}` | `resources: []`, `resourceTemplates: []` | Annonsert, men tomt til T-13/T-14. `subscribe:false` = ingen abonnement på endringer i én enkelt ressurs. |
+| `prompts` | `{"listChanged":true}` | `prompts: []` | Annonsert, men tomt til T-15. |
+| `logging` | `{}` | Ingen `@McpLogging`-bruk; ingen `notifications/message` sendes | Slått på fordi Spring AI aktiverer den som default. |
+| `completions` | `{}` | Ingen `@McpComplete`-metoder | Samme: default-på fra autokonfigurasjonen. |
+
+**Poenget:** capability-blokken sier hvilke *metode-familier* serveren svarer på — ikke at
+det finnes innhold i dem. Spring AI slår på tools/resources/prompts/completions/logging
+uavhengig av om du har annotert noe (se `McpServerAutoConfiguration`-linjene i stderr:
+«Enable resources capabilities», «Enable prompts capabilities», «Enable completions
+capabilities»). En klient som ser `prompts` i capabilities må derfor fortsatt kalle
+`prompts/list` for å oppdage at lista er tom. Etter hvert som backloggen jobbes gjennom
+fylles disse listene ut uten at capability-blokken endrer seg.
+
+#### Svar på oppgavens spørsmål
+
+**1. Hvorfor har `notifications/initialized` ingen `id` eller respons?**
+
+Fordi den er en **notifikasjon**, ikke en request. JSON-RPC 2.0 skiller på nettopp `id`:
+en melding med `id` er en request som *skal* få nøyaktig ett svar med samme `id`
+(`result` eller `error`); en melding uten `id` er en notifikasjon, og spesifikasjonen sier
+eksplisitt at mottakeren ikke skal svare på den — det finnes ingen `id` å korrelere et svar
+mot. `id`-en er altså ikke bare metadata: den *er* mekanismen som lar flere forespørsler
+være i luften samtidig over én stream og fortsatt pares med riktig svar.
+
+Semantisk passer det: `notifications/initialized` er klienten som sier «jeg har mottatt og
+akseptert capability-svaret ditt, håndtrykket er ferdig». Det er ren enveis-informasjon —
+serveren har ingenting å rapportere tilbake, og klienten venter ikke på noe. Meldingen
+markerer overgangen fra initialiseringsfasen til normal drift; først etter den er det lov å
+sende `tools/list`, `tools/call` osv. Det er også derfor røyktest-kommandoen har `sleep`
+mellom linjene: uten `id` finnes det ikke noe svar å vente på, så vi må vente på klokka i
+stedet. Samme mønster gjelder de andre `notifications/*`-meldingene (`tools/list_changed`,
+`message`, `cancelled`, `progress`) — alle er id-løse og ubesvarte.
+
+**2. Hvorfor har `about_application` tomme `properties` og `required`?**
+
+Fordi verktøyet ikke tar noen argumenter. Metoden i
+[`AboutTool.java`](src/main/java/no/computas/vacationmcp/tools/AboutTool.java) er
+`public String aboutApplication()` — parameterløs. Spring AI genererer `inputSchema` ved
+å reflektere over metodesignaturen (`JsonSchemaGenerator.generateForMethodInput`): den
+itererer over `method.getParameters()`, legger hver parameter inn i `properties` og hvert
+obligatoriske parameternavn i `required`. Med null parametere blir begge tomme.
+
+Merk at feltene fortsatt er *til stede*, ikke utelatt. `inputSchema` er en obligatorisk del
+av tool-kontrakten i MCP, og et gyldig JSON Schema for «et objekt uten felt» er nettopp
+`{"type":"object","properties":{},"required":[]}`. Klienten kaller derfor verktøyet med
+`"arguments":{}` — som verifisert i sonderingen over, der `tools/call` med tomt
+argument-objekt ga `isError:false` og teksten fra verktøyet. Skjemaet er skrevet i JSON
+Schema draft 2020-12 (`$schema`-feltet), og det er dette skjemaet LLM-en får se når den
+skal bestemme *om* og *hvordan* verktøyet skal kalles — beskrivelsen alene er ikke nok.
+
+**3. Hva endrer seg i `inputSchema` når et tool får en obligatorisk parameter?**
+
+Med en `@McpToolParam(description = "…", required = true) String query` på metoden vil
+`inputSchema` for det verktøyet se omtrent slik ut:
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "Fritekstsøk mot navn og beskrivelse." }
+  },
+  "required": ["query"]
+}
+```
+
+Konkret:
+
+- `properties` får en nøkkel per parameter, oppkalt etter **parameternavnet i Java**
+  (Spring Boot-plugin-en kompilerer med `-parameters`, så navnet overlever til bytekoden —
+  ellers hadde det blitt `arg0`). Verdien er et delskjema utledet av Java-typen:
+  `String → "type":"string"`, `int → "integer"`, `LocalDate → "type":"string"` med
+  dato-format, enum → `"enum":[…]`, en record → et nøstet `object` med egne `properties`,
+  `List<T> → "type":"array"` med `items`.
+- `description` fra `@McpToolParam` legges inn *inne i* delskjemaet for parameteren. Dette
+  er ren prompt-engineering mot modellen — det er her du forklarer format og forventning
+  (f.eks. «ISO-8601, `YYYY-MM-DD`»), og det er ofte forskjellen på at LLM-en gjetter riktig
+  eller feil.
+- `required` får parameternavnet lagt til. Vær obs: i Spring AI er parametere
+  **obligatoriske som default** (`PROPERTY_REQUIRED_BY_DEFAULT = true` i
+  `JsonSchemaGenerator`) — for et valgfritt argument må du eksplisitt skrive
+  `@McpToolParam(required = false)`, ellers havner det i `required` selv om
+  tjenestelaget tåler `null`. Det er direkte relevant for T-04 (`search_destinations`),
+  der alle tre parameterne til `DestinationService.search(...)` er valgfrie.
+- Selve verktøyoppføringen ellers (`name`, `description`, `annotations`) er uendret; det er
+  bare `inputSchema` som vokser.
+
+Det som *ikke* endrer seg: `"type":"object"`, `$schema`, capability-blokken fra
+`initialize` og protokollen for øvrig. Kontrakten utvides, den byttes ikke ut.
+
+Verifiseringssteget fra oppgaven («kjør `tools/list` på nytt etter T-03/T-04») krever at man
+kjører `./gradlew bootJar` først — jar-en er et øyeblikksbilde, og et nytt `@McpTool` dukker
+ikke opp i `tools/list` før den er bygget på nytt.
