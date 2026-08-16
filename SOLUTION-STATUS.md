@@ -14,7 +14,7 @@ etterpå. Én commit per oppgave.
 | T-01 | Bygg, kjør og inspiser skallet | 📝 | Grønn `clean build` + jar; `about_application` verifisert via stdio og Inspector-CLI; web-UI-et dokumentert ([se under](#t-01--bygg-kjør-og-inspiser-skallet)) |
 | T-02 | Koble serveren til Claude | 📝 | Registrert som stdio-server i Claude Code (`✔ Connected`) og `about_application` kalt gjennom hosten; README-oppskriften verifisert + presisert ([se under](#t-02--koble-serveren-til-claude)) |
 | T-03 | `list_destinations` | ✅ | `tools/DestinationTools.java` → verktøyet `list_destinations`; test `tools/DestinationToolsTest.java` ([se under](#t-03--list_destinations)) |
-| T-04 | `search_destinations` | ⬜ | — |
+| T-04 | `search_destinations` | ✅ | `search_destinations` med tre valgfrie parametere i `tools/DestinationTools.java` (+ krysshenvisning fra `list_destinations`); felles feilhåndtering etablert; 6 nye tester ([se under](#t-04--search_destinations)) |
 | T-05 | `check_availability` | ⬜ | — |
 | T-06 | `get_quote` | ⬜ | — |
 | T-07 | `create_booking` | ⬜ | — |
@@ -38,15 +38,19 @@ etterpå. Én commit per oppgave.
 - **stdio er fortsatt default.** T-17/T-18 legges bak Spring-profilen `http`, slik at
   `java -jar …` uten profil fortsatt er en stdio-server og T-01/T-02/README holder seg gyldige.
 - **Verktøykode skal delegere** til `service/`-laget — ingen ny forretnings- eller SQL-kode.
-- **Feilhåndtering:** `ValidationException`/`NotFoundException` fra tjenestelaget formidles
-  som MCP tool-feil (`isError`), ikke som stacktrace.
+- **Feilhåndtering (avgjort i T-04 — følg denne):** `ValidationException`/`NotFoundException`
+  fra tjenestelaget **får boble ut av verktøymetoden**. Ingen `try/catch` i `tools/`-laget.
+  Spring AI fanger exception-en i `SyncMcpToolMethodCallback.apply(...)` og returnerer et
+  `CallToolResult` med `isError: true` og feilmeldingen som tekst — protokollen svarer altså
+  `result`, ikke JSON-RPC `error`, og klienten får aldri en stacktrace. Detaljer, den faktiske
+  JSON-en og hvorfor alternativene ble valgt bort: [T-04-seksjonen](#t-04--search_destinations).
 - Hver oppgave = én commit med meldingsprefiks `T-xx: …`.
 
 ### Struktur for verktøyklasser (etablert i T-03 — følg denne)
 
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
-  `DestinationTools` (T-03 ✅, T-04) · `AvailabilityTools` (T-05) · `PricingTools` (T-06) ·
+  `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05) · `PricingTools` (T-06) ·
   `BookingTools` (T-07–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
@@ -64,8 +68,11 @@ etterpå. Én commit per oppgave.
   Spring AI sin default (`destructiveHint = true`) står igjen i katalogen.
 - **`description` er prompt-engineering**: si *hva* verktøyet gir, *når* modellen skal velge
   det framfor naboverktøyet, hvilke felt som kommer tilbake, og hvilke forbehold som gjelder.
-  Legg til krysshenvisning begge veier når nabo-verktøyet finnes (T-04 bør nevne
-  `list_destinations` og omvendt).
+  Legg til krysshenvisning begge veier når nabo-verktøyet finnes (gjort i T-04:
+  `list_destinations` og `search_destinations` peker på hverandre).
+- **Valgfrie parametere må merkes eksplisitt** med `@McpToolParam(required = false, …)`, og
+  Java-typen må være bokset (`Double`/`Integer`/`Long`) der `null` skal bety «ikke oppgitt».
+  Se T-04 for den faktiske `inputSchema`-en dette gir.
 
 ---
 
@@ -528,3 +535,143 @@ Stderr bekreftet registreringen: `Tilgjengelige MCP-tools (2): [about_applicatio
 
 > Husk `./gradlew bootJar` før røyktesten — jar-en er et øyeblikksbilde, og et nytt `@McpTool`
 > dukker ikke opp i `tools/list` før den er bygget på nytt (samme fallgruve som i T-01/T-02).
+
+### T-04 · `search_destinations`
+
+Andre verktøy i samme klasse — ingen nye filer:
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/DestinationTools.java` | nytt `@McpTool(name = "search_destinations")` → `DestinationService.search(query, country, maxPricePerNight)`; `description` på `list_destinations` utvidet med krysshenvisning |
+| `src/test/java/no/computas/vacationmcp/tools/DestinationToolsTest.java` | 6 nye tester (fritekst, land, pris, kombinasjon, ingen argumenter, negativ pris) |
+
+Metoden er fortsatt ett `return`-kall. All filtrering ligger i `DestinationRepository.search`
+(`LIKE` mot `name`/`description`, eksakt `country`, `price_per_night <= ?`, alltid
+`available = 1`, `ORDER BY id`), og valideringen i `DestinationService`.
+
+#### Den faktiske `inputSchema`-en — svaret på T-00 sitt tredje spørsmål
+
+Dette er verifisert med et nytt `tools/list` mot den nybygde jar-en, slik BACKLOG ber om i
+«Slik tester du» under [T-00](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner):
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Fritekst som må forekomme i navnet eller beskrivelsen til reisemålet, f.eks. «nordlys», «rorbu» eller «vingård». Delvis treff holder. Bruk ett stikkord om gangen — hele setninger matcher sjelden. Utelat for å ikke filtrere på tekst."
+    },
+    "country": {
+      "type": "string",
+      "description": "Land, skrevet nøyaktig slik det står i dataene (norsk landnavn, f.eks. «Norge», «Hellas», «Japan», «Italia»). Dette er et eksakt treff, ikke et delvis søk — er du usikker på skrivemåten, kall `list_destinations` først. Utelat for å søke i alle land."
+    },
+    "maxPricePerNight": {
+      "type": "number",
+      "format": "double",
+      "description": "Øvre grense for pris per natt i norske kroner; bare reisemål med pris lik eller lavere kommer med. Må være null eller positiv — et negativt tall avvises som feil. Utelat for å ikke filtrere på pris."
+    }
+  },
+  "required": []
+}
+```
+
+Sammenlignet med T-03, der skjemaet var `{"properties":{},"required":[]}`, er det nøyaktig det
+[T-00 forutsa](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner) som har skjedd:
+
+- **`properties` har én nøkkel per Java-parameter**, navngitt etter parameternavnet i bytekoden
+  (`-parameters`-flagget fra Spring Boot-plugin-en — ellers `arg0`, `arg1`, `arg2`).
+- **Typen er utledet av Java-typen:** `String → "type":"string"`, og `Double` blir
+  `"type":"number"` **med `"format":"double"`** i tillegg. Formatet er et hint, ikke en
+  begrensning — `2000` (heltall) blir godtatt like godt som `2000.0`.
+- **`description` fra `@McpToolParam` havner inne i delskjemaet** for hver parameter. Det er
+  her, ikke i tool-beskrivelsen, du forteller modellen at `country` er et eksakt treff.
+- **`required` er tom** — det er hele poenget med oppgaven. Uten
+  `@McpToolParam(required = false)` ville alle tre stått i lista, siden Spring AI har
+  `PROPERTY_REQUIRED_BY_DEFAULT = true` (`JsonSchemaGenerator`). Da måtte modellen sendt alle
+  tre argumentene ved hvert kall, og et søk «på alt i Norge» ville krevd en oppdiktet verdi
+  for `query` og `maxPricePerNight`.
+- `"type":"object"`, `$schema`, `name`, `description`, `annotations` og capability-blokken fra
+  `initialize` er uendret. Kontrakten *vokser*, den byttes ikke ut.
+
+`Double` og ikke `double`: med primitiv type ville et utelatt argument blitt `0.0`, som er en
+gyldig verdi tjenesten ville filtrert på (og alltid gitt tomt resultat). Boksede typer er det
+eneste som lar «ikke oppgitt» overleve helt fram til `DestinationService`. Samme regel gjelder
+`Integer`/`Long` i senere oppgaver.
+
+#### Feilhåndtering: exception-en får boble (mønsteret T-05–T-12 skal arve)
+
+Første gang en `ValidationException` kan nå ut til klienten. **Valget er å ikke gjøre noe** —
+ingen `try/catch`, ingen egen `CallToolResult`-bygging i verktøykoden. Begrunnelsen er hva
+Spring AI 2.0 allerede gjør i `SyncMcpToolMethodCallback.apply(...)`:
+
+```java
+catch (Exception e) {
+    if (this.toolCallExceptionClass.isInstance(e)) {   // default: Exception.class
+        return this.createSyncErrorResult(e);          // isError(true) + e.getMessage() + rot-årsakens melding
+    }
+    throw e;
+}
+```
+
+Verifisert gjennom protokollen (`tools/call` med `{"maxPricePerNight":-100}`):
+
+```jsonc
+{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"Error invoking method: searchDestinations\nmaxPricePerNight kan ikke være negativ"}],"isError":true}}
+```
+
+Tre ting å merke seg:
+
+1. **Det er et `result`, ikke et JSON-RPC `error`.** MCP skiller bevisst: protokollfeil (ukjent
+   metode, ugyldige `params`) blir `error`-objekter som klientkoden håndterer, mens *verktøyet
+   som feiler* er et normalt resultat med `isError: true` — nettopp fordi modellen skal få se
+   feilen og kunne prøve på nytt med bedre argumenter.
+2. **Ingen stacktrace.** `createSyncErrorResult` bruker bare `getMessage()` på exception-en og
+   på rot-årsaken. Stacktracen finnes ikke i svaret i det hele tatt; den ligger i
+   `logs/vacation-booking-mcp.log` for utvikleren.
+3. **Første linje er Spring AI sin egen innpakning.** `callMethod` pakker
+   `InvocationTargetException` i `RuntimeException("Error invoking method: searchDestinations", cause)`,
+   så teksten blir to linjer: innpakningens melding, og vår egen melding fra rot-årsaken.
+   Java-metodenavnet lekker altså ut (camelCase, ikke tool-navnet). Det er kosmetisk støy —
+   linje to er den som betyr noe, og den er ordrett meldingen fra `DestinationService`.
+
+Alternativet som ble vurdert og valgt bort: la verktøymetoden returnere `CallToolResult` og
+selv fange `ValidationException` (`convertValueToCallToolResult` slipper en `CallToolResult`
+rett gjennom, så det *virker*). Det ville fjernet «Error invoking method:»-linja, men til en
+høy pris: hvert av verktøyene i T-05–T-12 måtte fått en `try/catch`, og returtypen ville
+sluttet å være domene-recorden — som er selve konvensjonen fra T-03. Meldingen er allerede
+lesbar; prisen er for høy for en kosmetisk gevinst. **Konklusjon: kast videre, ikke fang.**
+
+> **Bonus:** argumenter som bryter selve skjemaet stoppes *før* metoden kalles, av serverens
+> egen JSON Schema-validering. `{"maxPricePerNight":"gratis"}` gir
+> `"Tool (search_destinations) input validation failed: … [/maxPricePerNight: string funnet, number forventet]"`
+> med `isError: true` — merk at meldingen er lokalisert etter JVM-ens locale. Det er derfor
+> `required = false` er nok for de valgfrie feltene: valideringen håndhever skjemaet, og
+> tjenestelaget håndhever reglene skjemaet ikke kan uttrykke (som «ikke negativ»).
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 26 tester (20 fra før + 6 nye). De nye dekker fritekst mot
+både navn og beskrivelse (`rorbu` → Lofoten, `nordlys` → Tromsø), landsfilter (`Norge` → to
+treff), pristak (inklusiv grense: 1850 tar med Lofoten), kombinasjonen av alle tre (`rorbu` +
+`Norge` + 2000 → Lofoten; samme med tak 1000 → tomt), at tre `null` gir samme svar som
+`list_destinations`, og at negativ pris kaster `ValidationException` med meldingen fra
+tjenesten.
+
+**2. Gjennom protokollen** — samme håndtrykk som i T-00, deretter `tools/list` og fire
+`tools/call`. `tools/list` viser nå **tre** verktøy
+(`Tilgjengelige MCP-tools (3): [about_application, list_destinations, search_destinations]` i
+stderr), og kallene ga:
+
+| Argumenter | Resultat |
+|------------|----------|
+| `{"query":"nordlys"}` | `isError:false`, 1 treff: Tromsø Nordlys-lodge (fritekst mot *beskrivelsen*) |
+| `{"country":"Norge","maxPricePerNight":2000}` | `isError:false`, 1 treff: Lofoten (Tromsø faller ut på pris) |
+| `{"maxPricePerNight":-100}` | `isError:true` med meldingen over |
+| `{}` | `isError:false`, alle 5 — tomt argument-objekt er lovlig når `required` er tom |
+
+**3. Småting som ble bekreftet på veien:** `LIKE` i SQLite er case-insensitiv for ASCII, så
+`"NORDLYS"` gir samme treff som `"nordlys"` (men *ikke* for `æ/ø/å` — der er `LIKE`
+case-sensitiv med mindre ICU er kompilert inn). Verktøybeskrivelsen lover derfor ikke noe om
+store/små bokstaver.
