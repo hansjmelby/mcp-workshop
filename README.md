@@ -19,7 +19,8 @@ deretter gjennom en **[backlog](BACKLOG.md)** av oppgaver som steg for steg legg
 
 - **JDK 21** (`java -version` skal vise 21).
 - Ingen lokal Gradle nødvendig — `./gradlew` laster den ned selv.
-- **Node/npx** for MCP Inspector (`npx @modelcontextprotocol/inspector`).
+- **Node/npx** for MCP Inspector (`npx @modelcontextprotocol/inspector`). Inspector v2 krever
+  Node ≥ 22.19.0.
 - En host for å bruke serveren «på ekte»: **Claude Desktop** eller **Claude Code**.
 
 > **På Windows:** Kommandoene under er skrevet for bash/zsh. I PowerShell og cmd bruker du
@@ -115,9 +116,9 @@ npx @modelcontextprotocol/inspector java -jar build/libs/vacation-booking-mcp-0.
 ```
 
 Inspector skriver ut en URL i terminalen med et **auth-token**
-(`http://localhost:6274/?MCP_PROXY_AUTH_TOKEN=…`). Åpne *akkurat den* URL-en — åpner du bare
-`http://localhost:6274` får du «connection error». Inspector lister så verktøyene; kall
-`about_application` og se svaret.
+(`http://localhost:6274/?MCP_INSPECTOR_API_TOKEN=…` i v2; het `MCP_PROXY_AUTH_TOKEN` i v1).
+Åpne *akkurat den* URL-en — åpner du bare `http://localhost:6274` får du «connection error».
+Inspector lister så verktøyene; kall `about_application` og se svaret.
 
 ### Koble til Claude (stdio)
 

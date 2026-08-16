@@ -61,11 +61,12 @@ gjerne i rekkefølge — senere epics bygger på tidligere. Fasiten ligger på `
   ```
 
   Inspector skriver ut en URL i terminalen med et **auth-token**
-  (`http://localhost:6274/?MCP_PROXY_AUTH_TOKEN=…`) — åpne *akkurat den* URL-en, ellers får
-  du «connection error».
+  (`http://localhost:6274/?MCP_INSPECTOR_API_TOKEN=…` i v2; het `MCP_PROXY_AUTH_TOKEN` i v1) —
+  åpne *akkurat den* URL-en, ellers får du «connection error». Inspector v2 krever Node ≥ 22.19.0.
 
   Hvis du i stedet startet `npx @modelcontextprotocol/inspector` **uten argumenter**, åpner
-  UI-et med tomme felt. Fyll da inn i venstre panel og klikk **Connect**:
+  UI-et med tomme felt. Fyll da inn og klikk **Connect** (i v2 via **Add Server**, i v1 i
+  venstre panel):
   - **Transport Type:** `STDIO`
   - **Command:** `java`
   - **Arguments:** `-jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar`
