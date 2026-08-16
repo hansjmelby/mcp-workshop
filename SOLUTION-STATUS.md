@@ -15,7 +15,7 @@ etterpå. Én commit per oppgave.
 | T-02 | Koble serveren til Claude | 📝 | Registrert som stdio-server i Claude Code (`✔ Connected`) og `about_application` kalt gjennom hosten; README-oppskriften verifisert + presisert ([se under](#t-02--koble-serveren-til-claude)) |
 | T-03 | `list_destinations` | ✅ | `tools/DestinationTools.java` → verktøyet `list_destinations`; test `tools/DestinationToolsTest.java` ([se under](#t-03--list_destinations)) |
 | T-04 | `search_destinations` | ✅ | `search_destinations` med tre valgfrie parametere i `tools/DestinationTools.java` (+ krysshenvisning fra `list_destinations`); felles feilhåndtering etablert; 6 nye tester ([se under](#t-04--search_destinations)) |
-| T-05 | `check_availability` | ⬜ | — |
+| T-05 | `check_availability` | ✅ | `tools/AvailabilityTools.java` → verktøyet `check_availability` (`LocalDate`-parametere + `AvailabilityResult`-konvolutt); felles datobeslutning etablert; test `tools/AvailabilityToolsTest.java` med 9 tester ([se under](#t-05--check_availability)) |
 | T-06 | `get_quote` | ⬜ | — |
 | T-07 | `create_booking` | ⬜ | — |
 | T-08 | `get_booking` | ⬜ | — |
@@ -50,7 +50,7 @@ etterpå. Én commit per oppgave.
 
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
-  `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05) · `PricingTools` (T-06) ·
+  `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06) ·
   `BookingTools` (T-07–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
@@ -73,6 +73,45 @@ etterpå. Én commit per oppgave.
 - **Valgfrie parametere må merkes eksplisitt** med `@McpToolParam(required = false, …)`, og
   Java-typen må være bokset (`Double`/`Integer`/`Long`) der `null` skal bety «ikke oppgitt».
   Se T-04 for den faktiske `inputSchema`-en dette gir.
+
+### Datoer over MCP-grensen (avgjort i T-05 — følg denne)
+
+**Bruk `java.time.LocalDate` som parametertype, ikke `String` med egen parsing.** Gjelder alle
+verktøy som tar imot datoer: T-05 ✅, og videre T-06 (`get_quote`), T-07 (`create_booking`) og
+T-12 (`cancel_booking`) dersom de trenger datoer.
+
+Begge premissene er verifisert empirisk mot den ekte JSON-en (se
+[T-05-seksjonen](#t-05--check_availability) for tracen):
+
+1. **Skjemaet blir riktig av seg selv.** Spring AI utleder
+   `{"type":"string","format":"date"}` for en `LocalDate` — nøyaktig den standardiserte
+   JSON Schema-måten å si «ISO-8601-dato» på. Med `String` hadde modellen fått et bart
+   `{"type":"string"}`, altså *mindre* informasjon, og formatkravet ville bare eksistert som
+   prosa i `description`.
+2. **Deserialiseringen virker.** `"2026-07-01"` blir en `LocalDate` gjennom protokollen uten
+   noen konfigurasjon (Jackson sin `JavaTimeModule` er på klassestien via Spring Boot).
+
+Konsekvensene å kjenne til:
+
+- **ISO-valideringen skjer før metoden kalles.** En ugyldig streng blir aldri en `LocalDate`,
+  så verktøykoden trenger ingen `try/catch` rundt parsing. Feilen kommer ut som
+  `isError: true` med teksten `Conversion from JSON to java.time.LocalDate failed` +
+  `Text 'i morgen' could not be parsed at index 0`.
+- **Meldingen kan vi ikke styre.** Det er prisen for valget, og den er den samme kosmetiske
+  støyen som `Error invoking method: …`-linja T-04 allerede aksepterte: Java-navn lekker,
+  men innholdet er lesbart og handlingsbart for modellen. Kompenser i
+  `@McpToolParam(description = …)` — skriv formatet (`yyyy-MM-dd`), et eksempel, og hvilke
+  skrivemåter som *ikke* virker.
+- **`format: "date"` håndheves ikke av skjemavalideringen** (JSON Schema behandler `format`
+  som en annotasjon, ikke en begrensning), så «01.07.2026» slipper gjennom validatoren og
+  stoppes først av Jackson. Feil *JSON-type* stoppes derimot av validatoren, før metoden:
+  `{"from": 20260701}` → `input validation failed: … [/from: integer funnet, string forventet]`.
+- **Datoregler som skjemaet ikke kan uttrykke** (`from < to`, `numTravelers ≥ 1`) hører hjemme
+  i tjenestelaget der det finnes et — `PricingService.quote(...)` og `BookingService` gjør
+  dette allerede, så T-06/T-07 skal *ikke* duplisere det i verktøyet. T-05 er unntaket:
+  `AvailabilityRepository` er rent dataaksess, så verktøyet validerer selv, med
+  `ValidationException` og **ordrett samme meldinger** som `PricingService`
+  (`"fra-dato må være før til-dato"`, `"fra- og til-dato må oppgis"`).
 
 ---
 
@@ -675,3 +714,160 @@ stderr), og kallene ga:
 `"NORDLYS"` gir samme treff som `"nordlys"` (men *ikke* for `æ/ø/å` — der er `LIKE`
 case-sensitiv med mindre ICU er kompilert inn). Verktøybeskrivelsen lover derfor ikke noe om
 store/små bokstaver.
+
+### T-05 · `check_availability`
+
+Første verktøy i Epic 2, og første gang datoer krysser MCP-grensen. To nye filer:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/tools/AvailabilityTools.java` | `@Component` med `@McpTool(name = "check_availability")` → `AvailabilityRepository.findOverlapping(...)`, pluss den nøstede recorden `AvailabilityResult` |
+| `src/test/java/no/computas/vacationmcp/tools/AvailabilityToolsTest.java` | `@SpringBootTest` med 9 tester mot de seedede periodene |
+
+Unntaket fra «deleger til `service/`»: det finnes **ingen** `AvailabilityService`. Verktøyet
+går derfor rett på repository-et, som er et rent dataaksesslag uten validering — og det er
+grunnen til at akkurat dette verktøyet har litt validering selv (se under).
+
+#### Datovalget: `LocalDate`, ikke `String` + parsing
+
+Dette er hovedspørsmålet i oppgaven, og det ble avgjort empirisk: en probe-versjon med
+`LocalDate`-parametere ble bygget, kjørt og målt gjennom protokollen **før** koden ble
+skrevet ferdig. Den faktiske `inputSchema`-en for de to datofeltene:
+
+```jsonc
+"from": {
+  "type": "string",
+  "format": "date",
+  "description": "Ønsket startdato (innsjekk) på ISO-8601-formatet yyyy-MM-dd, f.eks. «2026-07-01». Må være før til-datoen. Andre skrivemåter, som «01.07.2026» eller «i morgen», avvises — regn om til en konkret dato først."
+},
+"to": {
+  "type": "string",
+  "format": "date",
+  "description": "Ønsket sluttdato (utsjekk) på ISO-8601-formatet yyyy-MM-dd, f.eks. «2026-07-10». Må være etter fra-datoen; datoen regnes som utsjekksdag, så et opphold fra 1. til 10. er ni netter."
+}
+```
+
+Og `destinationId` (primitiv `long`, obligatorisk) ble
+`{"type":"integer","format":"int64"}` med alle tre navnene i `required`.
+
+**Det T-00 gjettet stemmer:** `LocalDate → "type":"string"` med dato-format. Konkret er det
+`"format":"date"` — JSON Schema sitt standardnavn for en ISO-8601-kalenderdato. Skjemaet er
+altså verken dårlig eller misvisende; det er det beste vi kunne skrevet for hånd. Med
+`String`-parametere hadde vi fått et bart `{"type":"string"}` og mistet `format`-hintet,
+altså gitt modellen *mindre* å gå på. Det avgjorde valget.
+
+**Deserialiseringen virker gjennom protokollen** — verifisert, ikke antatt:
+`{"from":"2026-07-01"}` kom fram som `LocalDate.of(2026, 7, 1)` uten noe oppsett. Jackson sin
+`JavaTimeModule` ligger på klassestien via Spring Boot, og Spring AI sin argument-konvertering
+bruker den.
+
+Fire sonderinger som kartla hvor formatvalideringen faktisk skjer:
+
+| Argument for `from` | Svar | Hvem stoppet det |
+|---------------------|------|------------------|
+| `"2026-07-01"` | `isError:false`, riktig periode | — (gyldig) |
+| `20260701` (tall) | `isError:true`, `Tool (check_availability) input validation failed: … [/from: integer funnet, string forventet]` | **skjemavalideringen**, før metoden |
+| `"01.07.2026"` | `isError:true`, `Conversion from JSON to java.time.LocalDate failed` / `Text '01.07.2026' could not be parsed at index 0` | **deserialiseringen**, før metoden |
+| `"2026-13-45"` | `isError:true`, `… failed` / `Invalid value for MonthOfYear (valid values 1 - 12): 13` | **deserialiseringen**, før metoden |
+
+Merk at `"format":"date"` **ikke** håndheves av skjemavalideringen — «01.07.2026» er en gyldig
+`string` og slipper forbi validatoren; det er Jackson som stopper den. JSON Schema behandler
+`format` som en annotasjon, ikke en begrensning. Praktisk betydning: `format`-hintet er til for
+*modellen*, mens den faktiske håndhevingen ligger et lag lenger inn.
+
+**Prisen for valget** er at feilmeldingen ved ugyldig format ikke kan styres — vi får
+Spring AI/Jackson sin tekst, med `java.time.LocalDate` synlig i den. Alternativet `String` +
+egen `LocalDate.parse` i en `try/catch` ville gitt en penere melding
+(«Ugyldig dato … bruk yyyy-MM-dd»), men til en pris som ble vurdert for høy:
+
+- Skjemaet mister `"format":"date"` — det modellen faktisk styres av.
+- Hver av T-06/T-07/T-12 måtte fått samme `try/catch` + konvertering før kallet til
+  `PricingService`/`BookingService`, som uansett tar `LocalDate`. Ren duplisert kjeleplate.
+- Det bryter med T-04-konklusjonen «kast videre, ikke fang» — vi hadde innført nettopp den
+  `try/catch`-en i `tools/`-laget som ble valgt bort der.
+
+Meldingen vi *får* er dessuten handlingsbar: den sier at strengen ikke lot seg tolke som en
+dato, og for feil måned til og med hvorfor. Kombinert med `format: "date"` og en
+`@McpToolParam(description = …)` som staver ut `yyyy-MM-dd`, har modellen alt den trenger for
+å prøve på nytt. **Konklusjon: `LocalDate`, og kompenser i beskrivelsen.** Dette er nå den
+felles beslutningen T-06/T-07/T-12 skal følge (se [seksjonen over](#datoer-over-mcp-grensen-avgjort-i-t-05--følg-denne)).
+
+#### Valideringen som ble igjen i verktøylaget
+
+`AvailabilityRepository` validerer ingenting — den er ren SQL. Sjekket etter, og det stemmer:
+`findOverlapping` bygger bare en `WHERE start_date < ? AND end_date > ?`. Med `to` før `from`
+ville spørringen gitt et vilkårlig (som regel tomt) resultat uten å si fra.
+
+Derfor gjør verktøyet to sjekker selv — det eneste stedet i løsningen der det er riktig:
+
+```java
+if (from == null || to == null) throw new ValidationException("fra- og til-dato må oppgis");
+if (!from.isBefore(to))        throw new ValidationException("fra-dato må være før til-dato");
+```
+
+Begge meldingene er **ordrett kopiert fra `PricingService.quote(...)`**, ikke nyskrevet. Poenget
+er at modellen skal møte samme feilspråk enten den bommet på datoene i `check_availability`
+eller i `get_quote`. ISO-formatdelen av akseptkriteriet er dekket av deserialiseringen (tabellen
+over), så den trengte ingen kode. `ValidationException` er samme klasse som tjenestelaget bruker,
+og den får boble ut etter T-04-mønsteret — ingen `try/catch`.
+
+#### Svaret: en konvolutt rundt lista, ikke en bar `[]`
+
+Returtypen er ikke `List<Availability>`, men en nøstet record:
+
+```java
+public record AvailabilityResult(
+        long destinationId, LocalDate from, LocalDate to,
+        int matchingPeriods, List<Availability> periods) {}
+```
+
+Dette er et bevisst avvik fra T-03-konvensjonen «returtype = domene-record eller `List<…>` av
+dem», og grunnen er nettopp det oppgaven peker på: **et bart `[]` er tvetydig for en modell.**
+Den ser ikke forskjell på «reisemålet er ikke åpent i disse datoene», «jeg spurte om feil
+periode» og «noe gikk galt» — og en LLM som er i tvil har lett for å melde tilbake at verktøyet
+feilet. Konvolutten gjentar spørringen og teller treffene, så `matchingPeriods: 0` leses som et
+svar, ikke som en feil:
+
+```json
+{"destinationId":1,"from":"2026-12-01","to":"2026-12-10","matchingPeriods":0,"periods":[]}
+```
+
+Avviket er *innpakning*, ikke mapping: `periods` inneholder domene-recorden `Availability`
+uendret, med `id`, `capacity` og `seasonPrice` intakt. Ingen formatering, ingen regler, ingen
+DTO-duplisering av domenet — konvensjonen fra T-03 gjelder fortsatt for innholdet.
+
+En ukjent `destinationId` gir også tom liste (verifisert med id 999). Å slå opp reisemålet og
+kaste `NotFoundException` ble vurdert, men valgt bort: det ville krevd `DestinationRepository`
+inn i en klasse som ellers har én avhengighet, og T-05 sitt akseptkriterium nevner bare
+datovalidering. Begrensningen er i stedet skrevet eksplisitt inn i verktøybeskrivelsen, slik at
+modellen vet at den bør sjekke id-en mot reisemåls-verktøyene når svaret er tomt.
+
+`description` sier også to ting til som ellers ville blitt gjettet feil: at en treffende periode
+bare betyr **overlapp** (ikke at hele oppholdet er dekket, eller at det er plass igjen — det
+avgjør `get_quote`/`create_booking`), og at `seasonPrice: null` betyr at reisemålets ordinære
+pris per natt gjelder.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 35 tester (26 fra før + 9 nye). De nye dekker overlappende
+periode med kapasitet og sesongpris, at konvolutten gjentar spørringen, en spørring som spenner
+over *to* perioder (2026-08-15→2026-09-15 treffer begge Lofoten-periodene, sortert på startdato,
+og den andre har `seasonPrice = null`), ingen overlapp (tom liste), ukjent destinasjon, `from`
+etter `to`, `from == to`, manglende datoer, og at ikke-ISO-strenger aldri blir en `LocalDate`.
+
+**2. Gjennom protokollen** — samme håndtrykk som i T-00, deretter `tools/list` og fem
+`tools/call` mot den nybygde jar-en. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (4): [about_application, check_availability, list_destinations, search_destinations]`.
+
+| Argumenter | Resultat |
+|------------|----------|
+| `{"destinationId":1,"from":"2026-08-15","to":"2026-09-15"}` | `isError:false`, `matchingPeriods:2` — begge Lofoten-periodene, den ene med `seasonPrice:2200.0`, den andre `null` |
+| `{"destinationId":1,"from":"2026-12-01","to":"2026-12-10"}` | `isError:false`, `matchingPeriods:0`, `periods:[]` — tom liste er et gyldig svar |
+| `{"destinationId":5,"from":"2026-11-20","to":"2026-11-27"}` | `isError:false`, 1 treff: Tromsø 2026-11-01→2027-02-28, kapasitet 4, sesongpris 2600 |
+| `{"destinationId":1,"from":"2026-07-10","to":"2026-07-01"}` | `isError:true`: `Error invoking method: checkAvailability` / `fra-dato må være før til-dato` |
+| `{"destinationId":1,"from":"i morgen","to":"2026-07-10"}` | `isError:true`: `Conversion from JSON to java.time.LocalDate failed` / `Text 'i morgen' could not be parsed at index 0` |
+
+Treffet på 2026-08-15→2026-09-15 er verdt å merke seg: `findOverlapping` bruker `start_date < to
+AND end_date > from`, altså **halvåpent** intervall, så en periode som bare delvis dekker
+spørringen kommer med. Det er riktig oppførsel for «hva er ledig rundt disse datoene?», men
+understreker hvorfor beskrivelsen må si at overlapp ikke er det samme som at oppholdet kan bookes.
