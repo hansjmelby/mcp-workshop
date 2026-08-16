@@ -17,7 +17,7 @@ etterpå. Én commit per oppgave.
 | T-04 | `search_destinations` | ✅ | `search_destinations` med tre valgfrie parametere i `tools/DestinationTools.java` (+ krysshenvisning fra `list_destinations`); felles feilhåndtering etablert; 6 nye tester ([se under](#t-04--search_destinations)) |
 | T-05 | `check_availability` | ✅ | `tools/AvailabilityTools.java` → verktøyet `check_availability` (`LocalDate`-parametere + `AvailabilityResult`-konvolutt); felles datobeslutning etablert; test `tools/AvailabilityToolsTest.java` med 9 tester ([se under](#t-05--check_availability)) |
 | T-06 | `get_quote` | ✅ | `tools/PricingTools.java` → verktøyet `get_quote` (fire obligatoriske parametere — første ikke-tomme `required`; `Quote` returneres uendret); test `tools/PricingToolsTest.java` med 13 tester ([se under](#t-06--get_quote)) |
-| T-07 | `create_booking` | ⬜ | — |
+| T-07 | `create_booking` | ✅ | `tools/BookingTools.java` → verktøyet `create_booking` (første **skrivende** verktøy — egne `annotations`; fem obligatoriske parametere; `Booking` returneres uendret); test `tools/BookingToolsTest.java` med 10 tester ([se under](#t-07--create_booking)) |
 | T-08 | `get_booking` | ⬜ | — |
 | T-09 | `update_booking_status` | ⬜ | — |
 | T-10 | `list_bookings` | ⬜ | — |
@@ -51,7 +51,7 @@ etterpå. Én commit per oppgave.
 - **Én klasse per domeneområde**, ikke én per verktøy, i `no.computas.vacationmcp.tools`
   med suffikset `Tools`. Planlagt fordeling:
   `DestinationTools` (T-03 ✅, T-04 ✅) · `AvailabilityTools` (T-05 ✅) · `PricingTools` (T-06 ✅) ·
-  `BookingTools` (T-07–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
+  `BookingTools` (T-07 ✅, T-08–T-12). `AboutTool` (entall) står igjen som eksempel-klassen fra skallet.
 - **Konstruktørinjeksjon** av tjenesten fra `service/`. Klassen er en fasade: den kaller
   tjenesten og returnerer resultatet — ingen mapping-, formaterings- eller regel-logikk.
 - **Metodenavnet er camelCase av verktøynavnet** (`list_destinations` → `listDestinations`),
@@ -62,8 +62,10 @@ etterpå. Én commit per oppgave.
   (`AbstractMcpToolMethodCallback.convertValueToCallToolResult`). Begrunnelse i T-03-seksjonen.
 - **`annotations`-hintene settes bevisst.** Lesende verktøy:
   `readOnlyHint = true, destructiveHint = false, idempotentHint = true, openWorldHint = false`.
-  Skrivende verktøy (T-07, T-09, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
-  vurder `destructiveHint` selv. Merk at `destructiveHint` og `idempotentHint` bare er
+  Skrivende verktøy (T-07 ✅, T-09, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
+  vurder `destructiveHint`/`idempotentHint` selv; se
+  [T-07-seksjonen](#t-07--create_booking) for den første faktiske hint-blokken og
+  begrunnelsen hint for hint. Merk at `destructiveHint` og `idempotentHint` bare er
   meningsbærende når `readOnlyHint == false`; vi setter dem likevel eksplisitt for å unngå at
   Spring AI sin default (`destructiveHint = true`) står igjen i katalogen.
 - **`description` er prompt-engineering**: si *hva* verktøyet gir, *når* modellen skal velge
@@ -991,3 +993,147 @@ end_date >= to`), mens `check_availability` bruker `findOverlapping`. Et opphold
 `get_quote` — periodene 1 og 2 er tilstøtende, ikke slått sammen. Det er lett for en modell å
 lese «to ledige perioder» som «kan bookes», så `description` sier det eksplisitt, og en egen
 test (`rejectsAStayThatSpansTwoAdjacentPeriods`) låser oppførselen.
+
+### T-07 · `create_booking`
+
+Første **skrivende** verktøy, og starten på Epic 3. To nye filer:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | `@Component` med `@McpTool(name = "create_booking")` → `BookingService.createBooking(...)` |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | `@SpringBootTest` med 10 tester, tall regnet for hånd mot `data.sql` |
+
+Metodekroppen er igjen **én linje**: `return bookings.createBooking(customerName, destinationId,
+from, to, numTravelers);`. Tjenesten gjør kundenavn-sjekken, kaller `PricingService.quote(...)`
+(som validerer datoer, antall reisende og reisemål), finner den dekkende perioden, trekker fra
+allerede bookede plasser, lagrer som `PENDING` og leser raden tilbake. Verktøyet legger ingenting
+oppå — heller ikke kapasitetsregelen fra T-11, som allerede ligger der.
+
+Klassen heter `BookingTools` fordi **T-08, T-09, T-10 og T-12 skal inn i samme klasse** (se
+«Struktur for verktøyklasser»). Alle fem verktøyene går mot den samme `BookingService`-en, så
+konstruktøren med én avhengighet holder hele veien; det som kommer til er metoder, ikke felt.
+`Booking` returneres uendret etter T-03-konvensjonen — den bærer `id`, `status` og `totalPrice`,
+altså alt akseptkriteriet ber om, pluss ekkoet av inputen.
+
+#### `annotations`: det første verktøyet som ikke er `readOnly`
+
+Den faktiske blokken fra `tools/list` mot den nybygde jar-en, ved siden av det de lesende
+verktøyene (T-03–T-06) har:
+
+```jsonc
+// create_booking (T-07)                        // get_quote / list_destinations / …
+"annotations": {                                // "annotations": {
+  "title": "Opprett booking",                   //   "title": "Beregn pris",
+  "readOnlyHint": false,                        //   "readOnlyHint": true,
+  "destructiveHint": false,                     //   "destructiveHint": false,
+  "idempotentHint": false,                      //   "idempotentHint": true,
+  "openWorldHint": false                        //   "openWorldHint": false
+}                                               // }
+```
+
+To av fire hint er altså snudd. Begrunnelsen, hint for hint:
+
+- **`readOnlyHint = false`** — verktøyet setter inn en rad i `bookings` og beslaglegger plasser i
+  perioden. Dette er hintet som *faktisk* betyr noe for en host: det er skillet mellom «et oppslag
+  den kan gjøre fritt» og «en handling som bør bekreftes/logges». Klienter som Claude Desktop og
+  Claude Code ber om godkjenning for verktøykall uansett, men `readOnlyHint` er det maskinlesbare
+  signalet en host bruker til å skille «auto-approve»-kandidatene fra resten — og
+  `list_destinations` skal ikke ligge i samme bøtte som `create_booking`.
+- **`destructiveHint = false`** — dette er det hintet det er lettest å sette feil. Spesifikasjonen
+  spør om oppdateringen er *additiv* eller *destruktiv*, ikke om den er «viktig». Et `INSERT`
+  legger til en ny rad: ingenting overskrives, ingen eksisterende booking endres, ingen data går
+  tapt, og handlingen kan angres (`cancel_booking`, T-12, frigjør kapasiteten igjen).
+  Sammenlign med T-09/T-12, som *endrer* status på en rad som allerede finnes — der er svaret et
+  annet. Merk at `false` her ikke betyr «kjør uten å spørre»; det er `readOnlyHint = false` som
+  ber hosten involvere brukeren.
+- **`idempotentHint = false`** — det viktigste hintet for akkurat dette verktøyet. To identiske
+  kall gir **to** bookinger med hver sin id og dobbelt så mange plasser beslaglagt; det finnes
+  ingen idempotensnøkkel som lar serveren kjenne igjen et gjentatt kall. Hintet forteller hosten
+  at et automatisk retry etter timeout ikke er trygt, og modellen at den ikke skal «prøve igjen
+  for sikkerhets skyld» hvis svaret ble borte. Verifisert i praksis: kall nummer to i røyktesten
+  ville fått `id: 2`, ikke `id: 1` på nytt.
+- **`openWorldHint = false`** — alt skjer mot vår egen SQLite-base med et lukket sett reisemål.
+  Ingen betalingsleverandør, ingen ekstern booking-partner, ingen nettverkskall. Uendret fra de
+  lesende verktøyene.
+
+Verktøybeskrivelsen sier det samme i prosa, siden hintene er *advisory* og en modell ikke
+nødvendigvis ser dem: «Dette er det første verktøyet som **endrer** noe … kall det bare én gang
+per opphold — to like kall gir to bookinger.»
+
+#### `inputSchema`: fem obligatoriske parametere
+
+```jsonc
+"required": ["customerName", "destinationId", "from", "to", "numTravelers"]
+```
+
+Ingen nye mønstre: `String → "string"`, `long → "integer"/"int64"`, `LocalDate →
+"string"/"date"` (T-05-beslutningen), `int → "integer"/"int32"`. Alle er obligatoriske, så
+primitivene er riktige — ingen «ikke oppgitt» som må overleve som `null`. `customerName` er
+førstemann i `properties`, i samme rekkefølge som Java-parameterne.
+
+#### Kapasitetsavvisningen (akseptkriteriet i T-11 — verifisert her, men T-11 er ikke krysset av)
+
+Meldingen fra `BookingService` kommer uendret ut gjennom verktøylaget, og den er handlingsbar:
+den sier **både** hvor mange plasser som er igjen og hvor mange som ble bedt om, så modellen kan
+foreslå et lavere antall eller andre datoer uten et nytt oppslag:
+
+```jsonc
+{"content":[{"type":"text","text":"Error invoking method: createBooking\nIkke nok kapasitet i perioden: 1 ledige plasser, 2 forespurt"}],"isError":true}
+```
+
+Innpakningslinja «Error invoking method: createBooking» er den samme kosmetiske støyen T-04
+allerede aksepterte. Beskrivelsen av verktøyet nevner meldingen ordrett og forteller hva modellen
+skal gjøre med den. Selve T-11-raden i tabellen står med vilje urørt — den oppgaven er ikke
+implementert her, bare demonstrert.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 58 tester (48 fra før + 10 nye). De nye dekker vellykket
+booking (id > 0, `status: PENDING`, `totalPrice` mot `data.sql`, og at ekkoet av inputen stemmer),
+at den returnerte bookingen er lik den lagrede (`bookings.get(id)`), ukjent reisemål
+(`NotFoundException`), datoer utenfor enhver periode, `numTravelers = 0`, tomt/blankt/`null`
+kundenavn, `from` etter `to`, kapasitetsgrensen med **ordrett** melding (1 ledig av 3, 2
+forespurt), en booking som fyller kapasiteten nøyaktig (og at neste da får «0 ledige plasser»),
+og at kapasiteten gjelder per *overlappende* periode — samme reisemål med ikke-overlappende datoer
+går fint.
+
+Testreisemålet er **Kyoto Machiya (id 3)**: 1600/natt, én periode 2026-10-01→2026-11-30 uten
+sesongpris og med kapasitet **3** — den laveste i seed-dataene, og derfor den som gjør
+kapasitetsgrensen enkel å treffe med to kall.
+
+> **Første testklasse som skriver til databasen.** Den følger opplegget fra `BookingServiceTest`:
+> `DELETE FROM bookings` i `@BeforeEach`, slik at kapasiteten er kjent uansett hva som lå igjen
+> fra en tidligere kjøring — `build/test-vacation.db` slettes ikke mellom `./gradlew test`-kall.
+> Her er den samme metoden i tillegg annotert `@AfterEach`, så bookinger fra denne klassen ikke
+> lekker inn i andre testklasser i samme kjøring (rekkefølgen er ikke garantert).
+
+**2. Gjennom protokollen** — håndtrykk som i T-00, deretter `tools/list` og fire `tools/call` mot
+den nybygde jar-en. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (6): [about_application, check_availability, create_booking, list_destinations, search_destinations, get_quote]`.
+
+| Argumenter (alle mot `destinationId: 3`) | Resultat |
+|------------------------------------------|----------|
+| `{"customerName":"Ola Nordmann","from":"2026-10-05","to":"2026-10-08","numTravelers":2}` | `isError:false` — se JSON-en under |
+| `…,"numTravelers":0` | `isError:true`: `antall reisende må være minst 1` |
+| `{"customerName":"Per Person","from":"2026-10-06","to":"2026-10-09","numTravelers":2}` | `isError:true`: `Ikke nok kapasitet i perioden: 1 ledige plasser, 2 forespurt` |
+| `{"customerName":"  ", …}` | `isError:true`: `kundenavn må oppgis` |
+
+Den vellykkede bookingen, ordrett fra tekstblokken:
+
+```json
+{"id":1,"customerName":"Ola Nordmann","destinationId":3,"startDate":"2026-10-05","endDate":"2026-10-08","numTravelers":2,"totalPrice":9600.0,"status":"PENDING"}
+```
+
+Kontrollregning mot `data.sql`: Kyoto koster 1600/natt og perioden (`availability` id 4) har
+`season_price = NULL`, så normalprisen gjelder. 2026-10-05→2026-10-08 er **3 netter** × **2
+reisende**: `1600 × 3 × 2 = 9600`. `id: 1` og `status: PENDING` er akseptkriteriet.
+
+Det tredje kallet er kapasitetssjekken i praksis: 2 av 3 plasser var tatt av det første kallet,
+og den nye forespørselen overlapper (6.–9. oktober mot 5.–8.) — derfor 1 ledig plass mot 2
+forespurt.
+
+> **Røyktesten skriver til den ekte `vacation.db` i prosjektroten.** Den er git-ignorert, men
+> ikke tom — bookinger derfra ville ligget igjen og påvirket kapasiteten neste gang noen kjører
+> serveren. Fila ble derfor kopiert før kjøringen og lagt tilbake etterpå
+> (`select count(*) from bookings` er 0 igjen). Alternativet er å slette `vacation.db` og la
+> `schema.sql`/`data.sql` seede den på nytt ved oppstart.
