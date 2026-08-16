@@ -52,7 +52,7 @@ gjerne i rekkefølge — senere epics bygger på tidligere. Fasiten ligger på `
 
 ### T-01 · Bygg, kjør og inspiser skallet
 - **Mål:** Få serveren opp og se eksempel-verktøyet i MCP Inspector.
-- **Akseptkriterier:** `./gradlew build` er grønt; du ser `about_application` i Inspector og får svar når du kaller det.
+- **Akseptkriterier:** `./gradlew build` (Windows: `.\gradlew.bat build`) er grønt; du ser `about_application` i Inspector og får svar når du kaller det.
 - **Hint:** Start Inspector og pek den på den kjørbare jar-en som stdio-kommando. Kjør
   fra prosjektroten, så den relative jar-stien stemmer:
 

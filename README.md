@@ -22,13 +22,19 @@ deretter gjennom en **[backlog](BACKLOG.md)** av oppgaver som steg for steg legg
 - **Node/npx** for MCP Inspector (`npx @modelcontextprotocol/inspector`).
 - En host for å bruke serveren «på ekte»: **Claude Desktop** eller **Claude Code**.
 
+> **På Windows:** Kommandoene under er skrevet for bash/zsh. I PowerShell og cmd bruker du
+> `.\gradlew.bat` i stedet for `./gradlew` — alt annet fungerer likt, og
+> `npx @modelcontextprotocol/inspector …` kan limes inn uendret. Unntaket er
+> [rå-tracen i «MCP under panseret»](#før-annotasjonene-mcp-under-panseret), som er ren bash og
+> krever **Git Bash** eller **WSL**. Windows-spesifikke varianter er notert der de trengs.
+
 ## Kom i gang
 
 ```bash
-# 1. Bygg og kjør testene
+# 1. Bygg og kjør testene            (Windows: .\gradlew.bat build)
 ./gradlew build
 
-# 2. Bygg en kjørbar jar
+# 2. Bygg en kjørbar jar             (Windows: .\gradlew.bat bootJar)
 ./gradlew bootJar
 
 # 3. Kjør serveren som en stdio-MCP-server
@@ -91,6 +97,11 @@ Du kan gjenskape tracen uten Inspector. Vent mellom meldingene: serveren må ha 
 } | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
 ```
 
+> **Windows:** Denne kommandoen er ren bash — kjør den i **Git Bash** eller **WSL**. Alternativt
+> (og det fungerer i PowerShell og cmd): start serveren med `java -jar …`, og lim inn de tre
+> klient-meldingene én og én med Enter etter hver. Serveren leser stdin linje for linje, så du
+> ser håndtrykket skje interaktivt.
+
 I en vanlig host gjør Inspector eller Claude denne håndtrykksekvensen for deg. Verktøyene er
 fortsatt bare JSON-RPC-metoder; Spring-annotasjonene er den praktiske måten å deklarere
 serverens del av kontrakten på.
@@ -123,6 +134,10 @@ Legg serveren inn i host-konfigurasjonen som en stdio-server (Claude Desktop-eks
   }
 }
 ```
+
+> **Windows:** Stien må ha **doble backslash** i JSON — `"C:\\Users\\deg\\mcp-workshop\\build\\libs\\vacation-booking-mcp-0.0.1-SNAPSHOT.jar"`.
+> Enkelt backslash gjør JSON-en ugyldig, og Claude feiler stille uten en tydelig melding.
+> (Forward slashes fungerer også: `"C:/Users/deg/mcp-workshop/build/libs/…"`.)
 
 Spør deretter Claude: «hva er denne applikasjonen?» — den skal bruke verktøyet.
 
@@ -296,20 +311,28 @@ java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > /dev/null   # kun
 java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar 2>/dev/null   # kun JSON-RPC (stdout)
 ```
 
+```powershell
+# PowerShell — samme to kommandoer (cmd bruker > NUL og 2> NUL)
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > $null
+java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar 2> $null
+```
+
 Den andre kommandoen viser hva en MCP-klient faktisk mottar: ingenting annet enn protokollen.
 
 **Loggfila er det mest praktiske under workshopen** — den skrives uansett hvem som startet
 serveren. La den stå åpen i et eget terminalvindu:
 
 ```bash
-tail -f logs/vacation-booking-mcp.log
+tail -f logs/vacation-booking-mcp.log                        # bash/zsh
+Get-Content -Wait logs\vacation-booking-mcp.log              # PowerShell
 ```
 
 Dette blir viktig fra og med **T-02**: når Claude Desktop starter jar-en som subprosess, har du
 ingen terminal å se i, og loggen er det eneste som forklarer hvorfor et verktøy feilet.
 
 - **MCP Inspector** viser serverens stderr i panelet «Error output from MCP server».
-- **Claude Desktop (macOS)** skriver den til `~/Library/Logs/Claude/mcp-server-vacation-booking.log`.
+- **Claude Desktop** skriver den til `~/Library/Logs/Claude/mcp-server-vacation-booking.log`
+  (macOS) eller `%APPDATA%\Claude\logs\mcp-server-vacation-booking.log` (Windows).
 
 ## Feilsøking
 
