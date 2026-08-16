@@ -25,7 +25,7 @@ etterpå. Én commit per oppgave.
 | T-12 | `cancel_booking` | ✅ | `cancel_booking` lagt til i `tools/BookingTools.java` — **funksjonelt identisk** med `update_booking_status(id, CANCELLED)` (`BookingService.cancel` *er* `updateStatus(id, CANCELLED)`); eget verktøy likevel, av hensyn til katalogen: ett argument i stedet for to, og en `destructiveHint = true`-oppføring hosten kan gate på ved navn. Kapasitetsfrigjøringen verifisert gjennom protokollen (fyll opp → avvist → `cancel_booking` → **samme** booking går gjennom); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-12--cancel_booking)) |
 | T-13 | Destinasjoner som Resource | ✅ | Ny pakke `resources/` → `resources/DestinationResources.java` med **to** `@McpResource`: den statiske `destination://catalog` (havner i `resources/list`) og malen `destination://{id}` (havner i `resources/templates/list`). Første primitiv som ikke er et verktøy: innholdet er **`text/markdown`**, ikke JSON, fordi det legges rått i konteksten; felles ressurs-beslutninger etablert for T-14; test `resources/DestinationResourcesTest.java` med 7 tester ([se under](#t-13--destinasjoner-som-resource)) |
 | T-14 | Bookinger som Resource | ✅ | `resources/BookingResources.java` med **én** `@McpResource`: malen `booking://{id}` (`resources/templates/list`). **Bevisst ingen liste-ressurs** — bookinger er transaksjonsdata som endres midt i samtalen, og en foreldet liste rått i konteksten er verre enn ingen; `list_bookings` dekker behovet. Innholdet slår opp reisemålsnavnet og gjengir lovlige statusoverganger fra `BookingStatus.canTransitionTo`; `booking://1` gir nå innhold i stedet for SDK-ens `-32002`; test `resources/BookingResourcesTest.java` med 10 tester ([se under](#t-14--bookinger-som-resource)) |
-| T-15 | Prompts | ⬜ | — |
+| T-15 | Prompts | ✅ | Ny pakke `prompts/` → `prompts/VacationPrompts.java` med **to** `@McpPrompt`: `plan_vacation_within_budget` (en **arbeidsflyt uttrykt som tekst** — fem argumenter, to obligatoriske, som skriver ut rekkefølgen T-03→T-07 skal kalles i) og `travel_summary` (instruksjon + bookingen **vedlagt** som `EmbeddedResource` med innhold gjenbrukt fra `booking://{id}`). Tredje og siste primitiv: **brukerstyrt** (menyvalg/slash-kommando), mot modellstyrte verktøy og applikasjonsstyrte ressurser. Empirisk verifisert at prompt-argumenter er en flat liste uten `inputSchema` (`@McpArg`, ikke `@McpToolParam`), at `required` **ikke håndheves av noen**, og at en `String`-returverdi gir rollen `assistant`; test `prompts/VacationPromptsTest.java` med 14 tester ([se under](#t-15--prompts)) |
 | T-16 | `bookings_report` | ⬜ | — |
 | T-17 | Streamable HTTP-transport | ⬜ | — |
 | T-18 | Bearer-token-auth | ⬜ | — |
@@ -197,6 +197,45 @@ bekreftet punktene på nytt for en helt annen datatype ([T-14](#t-14--bookinger-
 - **`title` og `annotations` på `@McpResource` er dødt i Spring AI 2.0.0** — `SyncMcpResourceProvider`
   leser bare `uri`, `name`, `description`, `mimeType` og `meta`. Verifisert: ingen av dem dukker
   opp i `resources/list`. Legg det klienten skal vise i `name` og `description`.
+
+### Prompts over MCP-grensen (avgjort i T-15 — følg denne)
+
+Gjelder T-15 ✅. Alt er verifisert mot den ekte JSON-en; tracen ligger i
+[T-15-seksjonen](#t-15--prompts). Prompts ligner mest på ressurser (ingen `inputSchema`, feil blir
+JSON-RPC-`error`), men skiller seg på to punkter som er lette å gå på:
+
+- **Egen pakke `no.computas.vacationmcp.prompts`**, klassenavn med suffikset `Prompts`
+  (`VacationPrompts` T-15 ✅). Til forskjell fra `tools/` og `resources/` er det **én klasse for
+  alle prompts**, ikke én per domeneområde: en prompt *er* en arbeidsflyt på tvers av domener, så
+  `plan_vacation_within_budget` (reisemål + tilgjengelighet + pris + booking) hører ikke hjemme i
+  noen av `DestinationTools`/`PricingTools`/`BookingTools`.
+- **Argumenter merkes med `@McpArg`, ikke `@McpToolParam`** — og `McpArg.required()` har default
+  **`false`**, motsatt av `@McpToolParam`. Uten annotasjonen får argumentet beskrivelsen
+  «Parameter of type String» og `required: false` (`PromptAdapter.extractPromptArguments`).
+- **`required` håndheves av ingen.** Det finnes ikke noe `inputSchema` for prompts, bare en flat
+  liste med `{name, description, required}`. Et manglende argument blir `null` i metoden
+  (`AbstractMcpPromptMethodCallback.buildArgs`), og SDK-en sjekker ingenting
+  (`McpAsyncServer.promptsGetRequestHandler` slår bare opp navnet). **Valideringen er vår**, og
+  argumenttypene må være boksede (`Double`/`Integer`/`String`) — en primitiv `double` gir en
+  uleselig refleksjonsfeil på `null`.
+- **Datobeslutningen fra T-05 gjelder *ikke* her.** `convertArgumentValue` kjenner bare `String`,
+  `Integer`, `Long`, `Double` og `Boolean`; alt annet «returneres as is and hope for the best» og
+  feiler i refleksjonskallet. Ta imot datoer som `String` og parse selv.
+- **Returtypen bestemmer rollen.** Godtatt: `GetPromptResult`, `PromptMessage`,
+  `List<PromptMessage>`, `List<String>`, `String` (`SyncMcpPromptMethodCallback.validateReturnType`).
+  Men `String` og `List<String>` pakkes som meldinger med rollen **`assistant`** — som om modellen
+  allerede hadde sagt det. En promptmal er noe *brukeren* sier, så returner `GetPromptResult` og
+  sett `Role.USER` selv. Bonus: bare `GetPromptResult` lar deg sette `description` på svaret.
+- **`title` *leses* på `@McpPrompt`** — i motsetning til `@McpResource`, der feltet er dødt (T-13).
+  `PromptAdapter.asPrompt` sender det videre inn i `McpSchema.Prompt`. Setter du det ikke, får
+  `prompts/list` `"title":""`, og hosten har bare snake_case-navnet å vise i menyen.
+- **Feil får boble, som overalt ellers.** `SyncMcpPromptMethodCallback.apply` pakker dem i
+  `-32602` med meldingen i `data` — nøyaktig samme innpakning (og samme `/nCause:`-skrivefeil) som
+  for ressurser. Og som der: `McpError` overlever ikke refleksjonen, så du kan ikke velge feilkode.
+- **En prompt bør peke på eksisterende ressurser, ikke duplisere dem.** `travel_summary` legger ved
+  `booking://{id}` som en `EmbeddedResource` med markdown-en fra `BookingResources.booking(...)`.
+  Gjenbruk koden, ikke teksten. Se [T-15](#t-15--prompts) for hvorfor `EmbeddedResource` slo både
+  `ResourceLink` og «bare skriv URI-en i teksten».
 
 ---
 
@@ -2319,3 +2358,298 @@ det ville kapasiteten på Kyoto (3 plasser) vært oppbrukt av rester fra tidlige
 
 Testene lager bookingene med `BookingService` direkte i stedet for via `BookingTools` — ressursen
 skal testes mot forretningslaget, ikke mot et annet MCP-lag.
+
+### T-15 · Prompts
+
+Tredje og siste primitiv, og **Epic 5 er dermed ferdig**. To nye filer, ingen endringer i
+eksisterende kode:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/prompts/VacationPrompts.java` | `@Component` med **to** `@McpPrompt`: `plan_vacation_within_budget` og `travel_summary` |
+| `src/test/java/no/computas/vacationmcp/prompts/VacationPromptsTest.java` | 14 tester (verktøyrekkefølge, rolle, valgfrie argumenter, budsjettomregning, all validering, vedlagt ressurs, annotasjonene) |
+
+#### Hvem styrer hva — de tre primitivene i ett bilde
+
+Dette er hele poenget med Epic 5, og det er verdt å ha én tabell å peke på. Serveren eksponerer nå
+alle tre, og for *de samme dataene*:
+
+| | **Tool** (`@McpTool`) | **Resource** (`@McpResource`) | **Prompt** (`@McpPrompt`) |
+|---|---|---|---|
+| Hvem bestemmer at den brukes? | **Modellen** | **Applikasjonen / hosten** | **Brukeren**, eksplisitt |
+| Hvordan velges den? | Modellen leser `inputSchema` og kaller midt i sin egen resonnering | Hosten lister dem som vedlegg/@-nevninger; innholdet legges rått i konteksten | Et menyvalg — typisk en slash-kommando brukeren skriver |
+| Hva er den? | Et **verb** — en handling | Et **substantiv** — et dokument | En **setning** — noe brukeren sier |
+| Adressering | Navn + argumenter, validert av JSON Schema | En URI (+ URI-variabler), ingen skjema | Navn + argumenter, ingen skjema |
+| Argumenter beskrives med | `@McpToolParam` (`required` default **true**) | ingenting — URI-variabler er alltid `String` | `@McpArg` (`required` default **false**, og håndheves ikke) |
+| Kan ha bivirkninger? | Ja (`create_booking`) | Nei — alltid ren lesing | Nei — den *produserer bare tekst* |
+| Protokollmetoder | `tools/list`, `tools/call` | `resources/list`, `resources/templates/list`, `resources/read` | `prompts/list`, `prompts/get` |
+| Feil | `result` med `isError: true` — modellen leser den og prøver på nytt | JSON-RPC `error` `-32602` | JSON-RPC `error` `-32602` |
+| Vår pakke | `tools/` | `resources/` | `prompts/` |
+
+Den korte versjonen: **tools er modellstyrt, resources er applikasjonsstyrt, prompts er
+brukerstyrt.** En modell velger aldri en prompt, og en prompt kjører aldri av seg selv — den skjer
+fordi et menneske klikket på den. Det er også derfor en prompt kan være så *bestemt* i tonen
+(«Book først når jeg har sagt ja»): brukeren har allerede sagt ja til akkurat denne
+instruksjonen ved å velge den fra menyen. Samme tekst i en `@McpTool.description` ville vært en
+instruksjon modellen møter uoppfordret, hver eneste gang katalogen lastes.
+
+Merk at grensene ikke er murer: MCP forbyr ikke en host å la modellen lese ressurser eller hente
+prompts. Men **designet** skal ta utgangspunkt i hvem primitiven er *ment* for — ellers ender du med
+tre kopier av samme verktøy.
+
+#### Prompt 1: `plan_vacation_within_budget` — en arbeidsflyt uttrykt som tekst
+
+Prompten kaller **ingen** tjenester og henter **ingen** data. Den skriver ut rekkefølgen
+verktøyene fra T-03 til T-07 skal brukes i:
+
+1. `list_destinations` / `search_destinations` — finn kandidater (utgangspris, ikke fasit)
+2. `check_availability` — er reisemålet ledig i perioden?
+3. `get_quote` — den ekte prisen, med sesongpris
+4. sammenlign mot budsjettet og presenter to–tre alternativer
+5. `create_booking` — **først etter** en eksplisitt bekreftelse fra brukeren
+
+Grunnen til at dette *må* være en prompt: rekkefølgen finnes ikke noe sted i `tools/list`. Hvert
+verktøy beskriver seg selv utmerket, men ingen av dem sier «kall meg etter `check_availability` og
+før `create_booking`». Alternativene er å presse arbeidsflyten inn i `description`-feltene — der den
+gjelder alle samtaler, også de som ikke handler om budsjett — eller å håpe at modellen gjetter
+riktig. En prompt gjør den navngitt, valgfri og synlig.
+
+Den ene utregningen prompten gjør er en *hjelp*, ikke en regel: er perioden oppgitt, regnes
+budsjettet om til en øvre pris per natt (45000 / (7 netter × 2 reisende) = 3214), som er akkurat det
+filteret `search_destinations` tar. Den ekte prisen kommer uansett fra `get_quote`.
+
+#### Prompt 2: `travel_summary` — pek på ressursen, ikke kopier den
+
+Oppgaven spør eksplisitt: skal sammendraget peke på `booking://{id}` fra T-14, eller gjenta
+innholdet? **Svaret er å peke — og MCP har en egen mekanisme for det.** Svaret består av to
+`user`-meldinger:
+
+1. en `TextContent` med instruksjonen («skriv et kort reisesammendrag … til kunden selv»)
+2. en **`EmbeddedResource`** som bærer med seg innholdet fra `booking://{id}`, komplett med `uri` og
+   `mimeType`
+
+Markdown-en produseres av `BookingResources.booking(...)` — den samme metoden som svarer på
+`resources/read`. Dupliseringen unngås altså ved å **gjenbruke koden**, ikke ved å utelate
+innholdet. En test slår fast likheten direkte:
+`assertEquals(bookingResources.booking(id), innhold.text())`.
+
+De tre alternativene og hvorfor de tapte:
+
+| Alternativ | Hvorfor ikke |
+|-----------|--------------|
+| Formatere bookingen på nytt i promptklassen | To steder å vedlikeholde samme tekst. De glir fra hverandre — det er bare et spørsmål om når |
+| Bare skrive «les `booking://7`» i teksten | Krever at hosten gjør et `resources/read` etterpå. Ikke alle gjør det, og vi kontrollerer det ikke |
+| `ResourceLink` i stedet for `EmbeddedResource` | Ren peker (URI + navn) — innholdet blir ikke med. Riktig når ressursen er stor eller brukeren skal velge, feil når hele poenget er å oppsummere én liten booking i én omgang |
+
+Resultatet er en **selvbærende** prompt: ett `prompts/get` gir hosten både instruksjonen og dataene.
+Prisen er den samme som ressursen alltid har hatt — innholdet er et øyeblikksbilde — så instruksjonen
+ber eksplisitt om et `get_booking` hvis statusen skal bekreftes, og sier at de skrivende verktøyene
+ikke hører hjemme her.
+
+Legg merke til hva dette gjør med T-14-beslutningen: `booking://{id}` var «bare» en mal et menneske
+kunne peke på. Nå er den også byggekloss i en prompt. Ressurser blir mer verdt jo flere primitiver
+som kan referere til dem — nok en grunn til at innholdet er lesbar markdown og ikke JSON.
+
+#### Slik ser prompt-argumenter faktisk ut i `prompts/list`
+
+Dette er oppgavens hovedspørsmål, og svaret er verifisert mot ekte JSON (ikke antatt). **Det finnes
+ikke noe `inputSchema` for prompts** — argumentene er en flat liste:
+
+```jsonc
+{"jsonrpc":"2.0","id":2,"result":{"prompts":[
+  {"name":"travel_summary","title":"Reisesammendrag","description":"Lager et kort, kundevennlig sammendrag av én booking: …","arguments":[
+    {"name":"bookingId","description":"Id-en til bookingen som skal oppsummeres, f.eks. «7». Kommer fra svaret på `create_booking` eller `list_bookings`. En ukjent id gir en feil, ikke et tomt sammendrag.","required":true}]},
+  {"name":"plan_vacation_within_budget","title":"Planlegg ferie innen budsjett","description":"Ferdig arbeidsflyt for å finne og booke en ferie innenfor et samlet budsjett. …","arguments":[
+    {"name":"budget","description":"Samlet budsjett for hele ferien i norske kroner, f.eks. 45000. Dette er totalsummen for alle reisende og alle netter, ikke prisen per natt.","required":true},
+    {"name":"numTravelers","description":"Antall reisende, minst 1. …","required":true},
+    {"name":"country","description":"Valgfritt land å begrense søket til, skrevet slik det står i katalogen …","required":false},
+    {"name":"from","description":"Valgfri innsjekksdato, ISO-8601 (yyyy-MM-dd), f.eks. «2026-07-01». Må oppgis sammen med «to».","required":false},
+    {"name":"to","description":"Valgfri utsjekksdato, ISO-8601 (yyyy-MM-dd) … Må oppgis sammen med «from».","required":false}]}]}}
+```
+
+Sammenlignet med et verktøy sitt `inputSchema`:
+
+- **Ja, argumentene får `description` og `required`** — men det er *alt*. Ingen `type`, ingen
+  `enum`, ingen `format: "date"`, ingen nøstede objekter. Alle de fine tingene fra T-05 og T-09 er
+  borte, fordi lista ikke er et JSON Schema.
+- **Annotasjonen heter `@McpArg`**, ikke `@McpToolParam` (`org.springframework.ai.mcp.annotation.McpArg`,
+  med `name`, `description`, `required`). Uten den genererer `PromptAdapter.extractPromptArguments`
+  beskrivelsen `"Parameter of type String"` og `required: false` — teknisk gyldig, praktisk
+  ubrukelig i en meny.
+- **`required` har default `false` i `@McpArg`** — stikk motsatt av `@McpToolParam`, der alt er
+  obligatorisk med mindre du sier fra (`PROPERTY_REQUIRED_BY_DEFAULT = true`, se T-00). To
+  annotasjoner, to defaults, samme ord. Det er en reell fallgruve.
+- **Rekkefølgen i `prompts/list` er ikke garantert.** `SyncMcpPromptProvider` sorterer på Java-
+  metodenavn, men SDK-en legger dem i et map før de listes ut — over står `travel_summary` først,
+  selv om `planVacationWithinBudget` sorterer først alfabetisk. Ikke bygg noe på rekkefølgen.
+- **`title` kom med** — beviset på at `@McpPrompt.title()` faktisk leses, i motsetning til
+  `@McpResource.title()` (T-13). Uten en verdi hadde det stått `"title":""`.
+
+#### `required` er dokumentasjon, ikke en kontrakt
+
+Den viktigste praktiske forskjellen fra verktøy. For et verktøy stoppes et manglende obligatorisk
+argument av skjemavalidereren, *før* metoden. For en prompt skjer det ingenting: `McpAsyncServer.
+promptsGetRequestHandler` slår bare opp navnet og kaller videre, og
+`AbstractMcpPromptMethodCallback.buildArgs` setter `args[i] = null` for det som mangler.
+
+Faktiske svar — både med et tomt `arguments` og helt uten `arguments`-objektet:
+
+```jsonc
+// id=5: {"name":"plan_vacation_within_budget","arguments":{"numTravelers":2}}  — «budget» mangler
+{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Error invoking prompt method: planVacationWithinBudget in no.computas.vacationmcp.prompts.VacationPrompts./nCause: Argumentet «budget» må oppgis. Det er det samlede budsjettet for hele ferien i norske kroner, f.eks. 45000.","data":"Argumentet «budget» må oppgis. …"}}
+
+// id=6: helt uten "arguments" — nøyaktig samme feil. Ingen ekstra sjekk noe sted.
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"… /nCause: Argumentet «budget» må oppgis. …","data":"…"}}
+
+// id=8: travel_summary med tomt arguments-objekt
+{"jsonrpc":"2.0","id":8,"error":{"code":-32602,"message":"… /nCause: Argumentet «bookingId» må oppgis. Det er id-en til bookingen som skal oppsummeres — hent den fra svaret på `create_booking` eller fra `list_bookings`.","data":"…"}}
+
+// id=9: gyldig argument, ukjent booking — NotFoundException fra BookingService bobler, som i T-14
+{"jsonrpc":"2.0","id":9,"error":{"code":-32602,"message":"… /nCause: Fant ingen booking med id 999999","data":"Fant ingen booking med id 999999"}}
+
+// id=10: ukjent promptnavn — her svarer SDK-en selv, før noen metode kalles
+{"jsonrpc":"2.0","id":10,"error":{"code":-32602,"message":"Invalid prompt name","data":"Prompt not found: finnes_ikke"}}
+```
+
+Konsekvensene, som er skrevet inn i koden:
+
+- **Boksede typer overalt.** `Double budget`, `Integer numTravelers` — ikke `double`/`int`. Med en
+  primitiv ville `Method.invoke(bean, args)` fått `null` og kastet en refleksjonsfeil som ikke sier
+  noe om hva brukeren skulle gjort.
+- **Feilmeldingene skrives for mennesket**, som for ressurser (T-13): `-32602` har ingen
+  `isError`-kanal modellen leser, så meldingen er alt vi styrer. Derfor «Argumentet «budget» må
+  oppgis. Det er det samlede budsjettet …», ikke «budget is required».
+- **Java-navnet lekker fortsatt** (`planVacationWithinBudget in no.computas.vacationmcp.prompts.
+  VacationPrompts`), og `/nCause:`-skrivefeilen i biblioteket er den samme som i T-13.
+- **Én bevisst avgjørelse: `bookingId` er en `String`, ikke en `Long`.** Med `Long` ville Spring AI
+  kalt `Long.parseLong` for oss inne i `convertArgumentValue`, og «abc» hadde gitt klienten
+  `For input string: "abc"`. Som `String` eier vi meldingen og kan peke videre til `list_bookings` —
+  nøyaktig samme resonnement som for URI-variabler i T-13/T-14.
+
+#### Returtyper og roller: den fellen som er lettest å gå i
+
+`SyncMcpPromptMethodCallback.validateReturnType` godtar **`GetPromptResult`, `PromptMessage`,
+`List<PromptMessage>`, `List<String>` og `String`**. Alt annet feiler ved *oppstart*, akkurat som
+for `@McpResource`. Men konverteringen i `convertToGetPromptResult` er ikke nøytral:
+
+| Returtype | Blir til | Rolle |
+|-----------|----------|-------|
+| `String` | én melding med `TextContent` | **`assistant`** |
+| `List<String>` | én melding per streng | **`assistant`** |
+| `PromptMessage` | meldingen, urørt | den du satte |
+| `List<PromptMessage>` | meldingene, urørt | den du satte |
+| `GetPromptResult` | urørt — og eneste måte å sette `description` på svaret | den du satte |
+
+`String` er det en deltaker skriver først, og det gir en melding som ser ut som om **modellen
+allerede har sagt teksten**. For en promptmal er det feil vei: en prompt er noe *brukeren* sier, som
+starter turen. Begge promptene her returnerer derfor `GetPromptResult` med `Role.USER`.
+`description` er en bonus — hosten kan vise «Reisesammendrag for booking://1» i menyen eller i
+historikken.
+
+Det faktiske svaret på `prompts/get` for `travel_summary` (forkortet i markdown-teksten, ellers
+ordrett):
+
+```jsonc
+{"jsonrpc":"2.0","id":7,"result":{"description":"Reisesammendrag for booking://1","messages":[
+  {"role":"user","content":{"type":"text","text":"Skriv et kort reisesammendrag av bookingen som er lagt ved under, til kunden selv. … Vedlegget er et øyeblikksbilde: skal du bekrefte at statusen fortsatt stemmer, kall `get_booking` med id-en fra vedlegget først. …"}},
+  {"role":"user","content":{"type":"resource","resource":{"uri":"booking://1","mimeType":"text/markdown","text":"# Booking 1 — Kari Nordmann\n\n- **id:** 1 — bruk denne i `get_booking`, `update_booking_status` og `cancel_booking`.\n- **Kunde:** Kari Nordmann\n- **Reisemål:** Kyoto Machiya (id 3), Japan\n- **Periode:** 2026-10-05 → 2026-10-08 (3 netter)\n- **Antall reisende:** 2\n- **Totalpris:** 9600 kr …\n- **Status:** PENDING — opprettet, men ikke bekreftet ennå\n- **Lovlige neste statuser:** CONFIRMED, CANCELLED\n"}}}]}}
+```
+
+`"type":"resource"` er `EmbeddedResource`, og `resource`-objektet er *identisk* med det ett
+`resources/read booking://1` ville gitt. Det er hele gjenbruken, synlig i protokollen.
+
+#### Argumentverdier: både tall og strenger virker
+
+`prompts/get` ble kjørt to ganger med samme prompt — én gang med `"budget":45000` (JSON-tall) og én
+gang med `"budget":"45000"` (JSON-streng, som MCP-spesifikasjonen faktisk foreskriver for
+prompt-argumenter). **Begge ga nøyaktig samme resultat.** `convertArgumentValue` håndterer begge
+veier: er verdien en `Number` brukes `doubleValue()`, ellers `Double.parseDouble(value.toString())`.
+
+Men lista over typer den kjenner er kort — `String`, `Integer`, `Long`, `Double`, `Boolean` — og for
+alt annet står det ordrett i kilden «return as is and hope for the best». **Derfor tar `from` og
+`to` imot `String` og parses her**, i motsetning til `PricingTools`, som bruker `LocalDate` direkte.
+[Datobeslutningen fra T-05](#datoer-over-mcp-grensen-avgjort-i-t-05--følg-denne) gjelder verktøy,
+ikke prompts: en `LocalDate`-parameter ville fått en `String` inn i refleksjonskallet og feilet med
+«argument type mismatch». Gevinsten er den samme som for `bookingId`: vi eier feilmeldingen, og den
+sier «Bruk ISO-8601 (yyyy-MM-dd), f.eks. «2026-07-01»».
+
+Med alle valgfrie argumenter satt (`id=4` i røyktesten) ble første steg i arbeidsflyten:
+
+```
+1. **Finn kandidater.** Kall `search_destinations` med `country` = «Japan» og `maxPricePerNight`
+   = 3214 (budsjettet delt på 7 netter og 2 reisende). Prisen du får her er en **utgangspris** per
+   natt — den er til å sortere etter, ikke til å love bort.
+```
+
+Uten dem (`id=3`) ble samme steg til «Kall `list_destinations` for hele katalogen …», og linja om
+datoer til «Jeg har ikke bestemt datoer ennå — foreslå en periode ut fra hva som er ledig.» Én
+prompt, to ganske ulike meldinger — det er nettopp det argumentene er til for.
+
+#### Verifisering i test
+
+**`./gradlew build` er grønt** — 121 tester (107 fra før + 14 nye i `VacationPromptsTest`). MCP-
+serveren er avskrudd i test, så promptene testes som de Spring-beanene de er: at verktøynavnene
+står i riktig **rekkefølge** i teksten (`indexOf`-sammenligninger — det er selve leveransen i en
+arbeidsflyt-prompt), at rollen er `USER` og ikke `ASSISTANT`, at `country` bytter fra
+`list_destinations` til `search_destinations`, at budsjettet blir til `maxPricePerNight = 3214`, at
+all valideringen slår inn med hjelpsomme meldinger (manglende argumenter, `budget <= 0`,
+`numTravelers < 1`, én dato uten den andre, feil datoformat, snudd rekkefølge), at vedlegget er en
+`EmbeddedResource` med riktig `uri`/`mimeType` og tekst **lik** `BookingResources.booking(...)`, og —
+via refleksjon på annotasjonene — at alle argumenter har `@McpArg` med navn og beskrivelse, at
+`required`-flaggene stemmer, og at `title` er satt.
+
+Testklassen skriver til databasen (`travel_summary` trenger en ekte booking), så den følger
+opplegget fra `BookingResourcesTest`: `DELETE FROM bookings` både `@BeforeEach` og `@AfterEach`.
+
+#### Røyktesten
+
+Jar-en ble bygget på nytt, `vacation.db` sikkerhetskopiert før og lagt tilbake etter, og testen kjørt
+i to faser (fase A oppretter en booking med `tools/call create_booking` og plukker id-en fra svaret;
+fase B kjører promptene). Hjelpeskriptet lå i en scratchpad-katalog utenfor repoet.
+
+```bash
+{ … initialize … ; notifications/initialized ;
+  {"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}} ;
+  {"…","id":3,"method":"prompts/get","params":{"name":"plan_vacation_within_budget","arguments":{"budget":45000,"numTravelers":2}}} ;
+  {"…","id":4,"method":"prompts/get","params":{"name":"plan_vacation_within_budget","arguments":{"budget":"45000","numTravelers":"2","country":"Japan","from":"2026-10-05","to":"2026-10-12"}}} ;
+  {"…","id":5,"method":"prompts/get","params":{"name":"plan_vacation_within_budget","arguments":{"numTravelers":2}}} ;
+  {"…","id":6,"method":"prompts/get","params":{"name":"plan_vacation_within_budget"}} ;
+  {"…","id":7,"method":"prompts/get","params":{"name":"travel_summary","arguments":{"bookingId":"1"}}} ;
+  {"…","id":8,"method":"prompts/get","params":{"name":"travel_summary","arguments":{}}} ;
+  {"…","id":9,"method":"prompts/get","params":{"name":"travel_summary","arguments":{"bookingId":"999999"}}} ;
+  {"…","id":10,"method":"prompts/get","params":{"name":"finnes_ikke","arguments":{}}} ;
+} | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > stdout.jsonl 2> stderr.log
+```
+
+Capability-blokken fra `initialize` er **fortsatt uendret** fra T-00
+(`"prompts":{"listChanged":true}`) — akkurat som for ressurser i T-13. Den lovet at metodene fantes;
+det som endret seg er at lista ikke lenger er tom. Oppstartsloggen på stderr, med alle tre
+primitivene på plass:
+
+```
+McpServerAutoConfiguration : Registered tools: 10
+McpServerAutoConfiguration : Registered resources: 1
+McpServerAutoConfiguration : Registered resource templates: 2
+McpServerAutoConfiguration : Registered prompts: 2            <- ny i T-15
+```
+
+Merk at `RegisteredToolsLogger` (fra skallet) bare teller verktøy — den lille linja fra Spring AI
+over er den raskeste sjekken på at prompts faktisk ble plukket opp. Scanneren er den samme som for
+verktøy og ressurser: `McpServerAnnotationScannerAutoConfiguration` ser etter `@McpPrompt`-metoder på
+alle Spring-beans, så en `@Component` er alt som skal til.
+
+#### Fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| Meldingen får rollen `assistant` | Metoden returnerer `String` eller `List<String>` | Returner `GetPromptResult` (eller `PromptMessage`) og sett `Role.USER` selv |
+| Serveren feiler ved **oppstart** med «Method must return either GetPromptResult, List\<PromptMessage\>, …» | Returtypen er en record/`List<Booking>` | Bare de fem godkjente typene finnes; formatering er din jobb, som for ressurser |
+| Argumentet heter `arg0` i `prompts/list` | Mangler `@McpArg(name = …)` og parameternavn er ikke bevart | Sett `name` eksplisitt — samme regel som for `@McpToolParam` |
+| Argumentbeskrivelsen er «Parameter of type String» | `@McpArg` mangler helt | Annoter alle argumenter |
+| Et «obligatorisk» argument kommer inn som `null` | `required` håndheves ikke — det finnes ikke noe `inputSchema` | Valider selv, og bruk boksede typer |
+| `NullPointerException`/refleksjonsfeil ved manglende argument | Parameteren er `int`/`double`/`long` | Bruk `Integer`/`Double`/`Long` |
+| `LocalDate`-parameter feiler med «argument type mismatch» | `convertArgumentValue` konverterer bare String/Integer/Long/Double/Boolean | Ta imot `String` og parse selv (motsatt av T-05 for verktøy) |
+| `"title":""` i `prompts/list` | `title()` er ikke satt | Sett den — her *leses* den, i motsetning til `@McpResource` (T-13) |
+| «Invalid prompt name» | Navnet i `prompts/get` matcher ingen `@McpPrompt(name = …)` | Sjekk `prompts/list`; SDK-en svarer før noen metode kalles |
+| Prompten dukker ikke opp i hosten | Jar-en er et øyeblikksbilde | `./gradlew bootJar` og koble til på nytt — samme fallgruve som for verktøy og ressurser |
+| Hosten viser ingen prompts i det hele tatt | Ikke alle hoster eksponerer prompts i UI-et | Test med Inspector eller stdio-røyktesten; `/mcp`-menyen i Claude Code viser dem som kommandoer |
