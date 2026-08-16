@@ -1,19 +1,38 @@
 package no.computas.vacationmcp.tools;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import io.modelcontextprotocol.spec.McpSchema.ElicitResult;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
 import no.computas.vacationmcp.domain.Booking;
 import no.computas.vacationmcp.domain.BookingStatus;
 import no.computas.vacationmcp.service.BookingService;
 import no.computas.vacationmcp.service.NotFoundException;
 import no.computas.vacationmcp.service.ValidationException;
+import no.computas.vacationmcp.tools.BookingTools.BookingConfirmation;
+import no.computas.vacationmcp.tools.BookingTools.InteractiveBookingResult;
+import no.computas.vacationmcp.tools.BookingTools.InteractiveOutcome;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.springframework.ai.mcp.annotation.context.McpRequestContextTypes.ElicitationSpec;
+import org.springframework.ai.mcp.annotation.context.McpSyncRequestContext;
+import org.springframework.ai.mcp.annotation.context.StructuredElicitResult;
+import org.springframework.ai.mcp.annotation.method.tool.utils.McpJsonSchemaGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -836,5 +855,294 @@ class BookingToolsTest {
         assertEquals(viaDedikert.destinationId(), viaGenerisk.destinationId());
         assertEquals(viaDedikert.numTravelers(), viaGenerisk.numTravelers());
         assertEquals(viaDedikert.totalPrice(), viaGenerisk.totalPrice());
+    }
+
+    // =================================================================================
+    // T-20 · create_booking_interactive (elicitation)
+    //
+    // Her går det ikke an å teste «hele veien» uten en ekte klient som kan svare på
+    // elicitation/create. Det som testes er alt PÅ VÅR SIDE av grensen: at valideringen
+    // skjer før brukeren plages, at capability-sjekken virker, at alle tre svarene fra
+    // spesifikasjonen behandles riktig, og at ingenting lagres uten et ja. Selve
+    // JSON-RPC-runden mot hosten er stubbet med en mock av McpSyncRequestContext — det er
+    // grensesnittet Spring AI selv gir verktøymetoden, så stubben treffer nøyaktig der
+    // rammeverket slutter og koden vår begynner. At forespørselen faktisk NÅR en host er
+    // verifisert utenfor testene; se T-20-seksjonen i SOLUTION-STATUS.md.
+    //
+    // Mockito er første gang i bruk i dette repoet. Alternativet var en håndskrevet
+    // implementasjon av McpSyncRequestContext, som har 28 metoder — 26 av dem irrelevante her.
+    // =================================================================================
+
+    /** Fanger meldingen verktøyet bygger, så vi kan se hva brukeren faktisk ville fått opp. */
+    private static final class MeldingsFanger implements ElicitationSpec {
+
+        private String melding;
+
+        @Override
+        public ElicitationSpec message(String message) {
+            this.melding = message;
+            return this;
+        }
+
+        @Override
+        public ElicitationSpec meta(Map<String, Object> m) {
+            return this;
+        }
+
+        @Override
+        public ElicitationSpec meta(String k, Object v) {
+            return this;
+        }
+    }
+
+    /** Et ferdig utfylt og bekreftet skjema — «brukeren sa ja». */
+    private static final BookingConfirmation JA = new BookingConfirmation("Kari Nordmann", true);
+
+    private final MeldingsFanger fanger = new MeldingsFanger();
+
+    /** En klient som svarer på elicitation, med det utfallet og innholdet testen bestemmer. */
+    private McpSyncRequestContext klientSomSvarer(
+            ElicitResult.Action action, BookingConfirmation svar) {
+        McpSyncRequestContext ctx = mock(McpSyncRequestContext.class);
+        when(ctx.elicitEnabled()).thenReturn(true);
+        when(ctx.elicit(
+                        ArgumentMatchers.<Consumer<ElicitationSpec>>any(),
+                        eq(BookingConfirmation.class)))
+                .thenAnswer(
+                        kall -> {
+                            // Kjør verktøyets egen spec-lambda, slik Spring AI ville gjort.
+                            kall.<Consumer<ElicitationSpec>>getArgument(0).accept(fanger);
+                            return new StructuredElicitResult<>(action, svar, null);
+                        });
+        return ctx;
+    }
+
+    /** En klient uten elicitation i capabilities — altså de aller fleste klienter. */
+    private McpSyncRequestContext klientUtenElicitation() {
+        McpSyncRequestContext ctx = mock(McpSyncRequestContext.class);
+        when(ctx.elicitEnabled()).thenReturn(false);
+        return ctx;
+    }
+
+    private InteractiveBookingResult interaktivKyotoBooking(McpSyncRequestContext ctx) {
+        return tools.createBookingInteractive(ctx, KYOTO, FROM, TO, 2);
+    }
+
+    private int antallBookinger() {
+        return jdbc.queryForObject("SELECT count(*) FROM bookings", Integer.class);
+    }
+
+    /**
+     * <b>Fallback-veien, og den viktigste testen her.</b> Uten elicitation i klientens
+     * capabilities skal verktøyet ikke kaste, ikke henge og ikke booke — det skal levere
+     * pristilbudet med et utfall som sier hva som skjedde. Merk at {@code elicit(...)} aldri
+     * kalles: hadde vi latt Spring AI oppdage det selv, hadde vi fått en
+     * {@code IllegalStateException} og et Java-klassenavn ut til modellen.
+     */
+    @Test
+    void fallsBackToTheQuoteWhenTheClientCannotElicit() {
+        McpSyncRequestContext ctx = klientUtenElicitation();
+
+        InteractiveBookingResult result = interaktivKyotoBooking(ctx);
+
+        assertEquals(InteractiveOutcome.ELICITATION_NOT_SUPPORTED, result.outcome());
+        assertNull(result.booking(), "ingenting skal være lagret");
+        assertEquals(0, antallBookinger());
+        // Pristilbudet er likevel gyldig og komplett — det er hele poenget med fallbacken.
+        assertNotNull(result.quote());
+        assertEquals(9600.0, result.quote().totalPrice()); // 1600 × 3 netter × 2 reisende
+        assertEquals("Kyoto Machiya", result.quote().destination().name());
+        assertTrue(
+                result.message().contains("create_booking"),
+                "meldingen skal peke modellen videre til det ikke-interaktive verktøyet");
+        verify(ctx, never())
+                .elicit(
+                        ArgumentMatchers.<Consumer<ElicitationSpec>>any(),
+                        eq(BookingConfirmation.class));
+    }
+
+    /**
+     * <b>Rekkefølgen er en del av designet:</b> pristilbudet hentes først, så et ugyldig kall
+     * feiler <em>før</em> brukeren får opp en dialog. Ingen skal bli bedt om å bekrefte et
+     * opphold som uansett ikke kan bookes.
+     */
+    @Test
+    void validatesBeforeAskingTheUser() {
+        McpSyncRequestContext ctx = klientSomSvarer(ElicitResult.Action.ACCEPT, JA);
+
+        assertEquals(
+                "fra-dato må være før til-dato",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.createBookingInteractive(ctx, KYOTO, TO, FROM, 2))
+                        .getMessage());
+        assertEquals(
+                "antall reisende må være minst 1",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.createBookingInteractive(ctx, KYOTO, FROM, TO, 0))
+                        .getMessage());
+        assertEquals(
+                "Fant ingen destinasjon med id 999",
+                assertThrows(
+                                NotFoundException.class,
+                                () -> tools.createBookingInteractive(ctx, 999L, FROM, TO, 2))
+                        .getMessage());
+
+        verify(ctx, never())
+                .elicit(
+                        ArgumentMatchers.<Consumer<ElicitationSpec>>any(),
+                        eq(BookingConfirmation.class));
+        assertEquals(0, antallBookinger());
+    }
+
+    /** Det glade tilfellet: {@code accept} + avkrysset bekreftelse ⇒ booking. */
+    @Test
+    void createsTheBookingWhenTheUserConfirms() {
+        InteractiveBookingResult result =
+                interaktivKyotoBooking(klientSomSvarer(ElicitResult.Action.ACCEPT, JA));
+
+        assertEquals(InteractiveOutcome.BOOKED, result.outcome());
+        assertNotNull(result.booking());
+        assertTrue(result.booking().id() > 0);
+        assertEquals(BookingStatus.PENDING, result.booking().status());
+        assertEquals(9600.0, result.booking().totalPrice());
+        // Navnet kommer fra SKJEMAET, ikke fra et verktøyargument — det er halve poenget.
+        assertEquals("Kari Nordmann", result.booking().customerName());
+        assertEquals(1, antallBookinger());
+        assertEquals(result.booking(), tools.getBooking(result.booking().id()));
+    }
+
+    /**
+     * {@code decline} — brukeren sa nei. Ingen feil, ingen rad. Utfallet må være maskinlesbart,
+     * for en modell som bare leser {@code message} kan finne på å «prøve igjen».
+     */
+    @Test
+    void doesNotBookWhenTheUserDeclines() {
+        InteractiveBookingResult result =
+                interaktivKyotoBooking(klientSomSvarer(ElicitResult.Action.DECLINE, null));
+
+        assertEquals(InteractiveOutcome.DECLINED, result.outcome());
+        assertNull(result.booking());
+        assertEquals(0, antallBookinger());
+        assertNotNull(result.quote(), "pristilbudet følger med uansett utfall");
+    }
+
+    /**
+     * {@code cancel} — dialogen ble lukket uten et valg. Spesifikasjonen skiller den fra
+     * {@code decline}, og det gjør vi også: «lukket vinduet» er ikke det samme som «nei».
+     */
+    @Test
+    void doesNotBookWhenTheUserDismissesTheDialog() {
+        InteractiveBookingResult result =
+                interaktivKyotoBooking(klientSomSvarer(ElicitResult.Action.CANCEL, null));
+
+        assertEquals(InteractiveOutcome.CANCELLED, result.outcome());
+        assertNull(result.booking());
+        assertEquals(0, antallBookinger());
+    }
+
+    /**
+     * <b>Fella {@code accept} setter opp:</b> handlingen betyr «skjemaet kom tilbake», ikke
+     * «ja». Sendes det inn med bekreftelsen usatt — eller helt uten feltet, for ingen validerer
+     * svaret for oss — skal ingenting lagres.
+     */
+    @Test
+    void treatsAnUnconfirmedFormAsANo() {
+        InteractiveBookingResult nei =
+                interaktivKyotoBooking(
+                        klientSomSvarer(
+                                ElicitResult.Action.ACCEPT,
+                                new BookingConfirmation("Kari Nordmann", false)));
+        assertEquals(InteractiveOutcome.NOT_CONFIRMED, nei.outcome());
+        assertNull(nei.booking());
+
+        InteractiveBookingResult mangler =
+                interaktivKyotoBooking(
+                        klientSomSvarer(
+                                ElicitResult.Action.ACCEPT,
+                                new BookingConfirmation("Kari Nordmann", null)));
+        assertEquals(InteractiveOutcome.NOT_CONFIRMED, mangler.outcome());
+        assertNull(mangler.booking());
+
+        assertEquals(0, antallBookinger());
+    }
+
+    /**
+     * Meldingen er det eneste mennesket faktisk leser før det sier ja. Alle tallene
+     * bekreftelsen gjelder må stå der — ellers bekrefter brukeren noe hen ikke har sett.
+     */
+    @Test
+    void theConfirmationMessageShowsTheDatesAndTheTotalPrice() {
+        interaktivKyotoBooking(klientSomSvarer(ElicitResult.Action.DECLINE, null));
+
+        String melding = fanger.melding;        assertNotNull(melding, "verktøyet skal ha satt en melding på ElicitationSpec");
+        assertTrue(melding.contains("Kyoto Machiya"), melding);
+        assertTrue(melding.contains("2026-10-05"), melding);
+        assertTrue(melding.contains("2026-10-08"), melding);
+        assertTrue(melding.contains("9600"), melding);
+        assertTrue(melding.contains("1600"), melding);
+        // Ingen «9600.0» — beløp med .0 er støy i en dialog et menneske skal lese.
+        assertFalse(melding.contains("9600.0"), melding);
+    }
+
+    /**
+     * Kundenavnet kommer fra brukeren, men valideres fortsatt av tjenestelaget — verktøyet
+     * gjentar ikke regelen. Et blankt navn i skjemaet blir en helt vanlig
+     * {@code ValidationException} som bobler ut (T-04).
+     */
+    @Test
+    void aBlankNameFromTheFormIsRejectedByTheService() {
+        McpSyncRequestContext ctx =
+                klientSomSvarer(ElicitResult.Action.ACCEPT, new BookingConfirmation("  ", true));
+
+        assertEquals(
+                "kundenavn må oppgis",
+                assertThrows(ValidationException.class, () -> interaktivKyotoBooking(ctx))
+                        .getMessage());
+        assertEquals(0, antallBookinger());
+    }
+
+    /**
+     * <b>Et pristilbud er ingen reservasjon.</b> Kapasiteten sjekkes av {@code BookingService}
+     * <em>etter</em> at brukeren har bekreftet, så blir plassene tatt mens dialogen står oppe,
+     * feiler kallet — med akkurat samme melding som {@code create_booking} gir.
+     */
+    @Test
+    void capacityIsCheckedAfterTheUserHasConfirmed() {
+        book("Fyller opp", 5, 8, 3); // Kyoto har kapasitet 3 i perioden
+
+        assertEquals(
+                "Ikke nok kapasitet i perioden: 0 ledige plasser, 2 forespurt",
+                assertThrows(
+                                ValidationException.class,
+                                () ->
+                                        interaktivKyotoBooking(
+                                                klientSomSvarer(ElicitResult.Action.ACCEPT, JA)))
+                        .getMessage());
+        assertEquals(1, antallBookinger(), "bare bookingen som fylte opp skal ligge der");
+    }
+
+    /**
+     * Pinner ned skjemaet Spring AI faktisk sender i {@code requestedSchema}. MCP tillater bare
+     * et <b>flatt</b> skjema med primitive felt, så dette er kontrakten det er lettest å bryte
+     * ved et uhell — legger noen til en nøstet record i {@link BookingConfirmation}, avvises
+     * forespørselen av SDK-en, ikke av kompilatoren. Genereringen er den samme som
+     * {@code DefaultMcpSyncRequestContext.generateElicitSchema} gjør (den fjerner i tillegg
+     * {@code $schema}, som elicitation-skjemaet ikke tillater).
+     */
+    @Test
+    void theElicitationSchemaIsFlatWithPrimitiveFieldsOnly() {
+        String schema = McpJsonSchemaGenerator.generateFromType(BookingConfirmation.class);
+        assertTrue(schema.contains("\"type\" : \"object\""), schema);
+        assertTrue(schema.contains("\"customerName\""), schema);
+        assertTrue(schema.contains("\"type\" : \"string\""), schema);
+        assertTrue(schema.contains("\"confirmed\""), schema);
+        assertTrue(schema.contains("\"type\" : \"boolean\""), schema);
+        // Beskrivelsene fra @JsonPropertyDescription er det brukeren ser ved hvert felt.
+        assertTrue(schema.contains("Fullt navn bookingen skal stå på"), schema);
+        // Flatt: ingen nøstede objekter og ingen $defs/$ref å følge.
+        assertFalse(schema.contains("$defs"), schema);
+        assertFalse(schema.contains("$ref"), schema);
     }
 }

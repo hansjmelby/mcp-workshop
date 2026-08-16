@@ -1,23 +1,30 @@
 package no.computas.vacationmcp.tools;
 
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Locale;
 import no.computas.vacationmcp.domain.Booking;
 import no.computas.vacationmcp.domain.BookingStatus;
 import no.computas.vacationmcp.service.BookingService;
+import no.computas.vacationmcp.service.PricingService;
+import no.computas.vacationmcp.service.Quote;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
+import org.springframework.ai.mcp.annotation.context.McpSyncRequestContext;
+import org.springframework.ai.mcp.annotation.context.StructuredElicitResult;
 import org.springframework.stereotype.Component;
 
 /**
  * MCP-verktøy for booking-arbeidsflyten (Epic 3–4 i {@code BACKLOG.md}).
  *
- * <p>Klassen er hjemmet til hele booking-domenet og er komplett etter T-12:
- * {@code create_booking} (T-07), {@code get_booking} (T-08),
- * {@code update_booking_status} (T-09), {@code list_bookings} (T-10) og
- * {@code cancel_booking} (T-12). Alle fem går mot den samme {@link BookingService}-en, så
- * konstruktøren har hele veien klart seg med én avhengighet — det som kom til underveis var
- * metoder, ikke felt.
+ * <p>Klassen er hjemmet til hele booking-domenet: {@code create_booking} (T-07),
+ * {@code get_booking} (T-08), {@code update_booking_status} (T-09), {@code list_bookings}
+ * (T-10), {@code cancel_booking} (T-12) og {@code create_booking_interactive} (T-20). De fem
+ * første går mot den samme {@link BookingService}-en, så konstruktøren klarte seg med én
+ * avhengighet helt fram til T-20 — det som kom til underveis var metoder, ikke felt. T-20 er
+ * det første verktøyet her som trenger noe mer: det henter et pristilbud
+ * ({@link PricingService}) <em>før</em> det spør brukeren, og skriver bare hvis svaret er ja.
  *
  * <p>Som de andre {@code *Tools}-klassene er dette en ren fasade: tjenesten validerer,
  * beregner pris, håndhever kapasitet og tilstandsmaskin. Verktøyene her legger ingen regler
@@ -43,9 +50,11 @@ import org.springframework.stereotype.Component;
 public class BookingTools {
 
     private final BookingService bookings;
+    private final PricingService pricing;
 
-    public BookingTools(BookingService bookings) {
+    public BookingTools(BookingService bookings, PricingService pricing) {
         this.bookings = bookings;
+        this.pricing = pricing;
     }
 
     /**
@@ -553,5 +562,371 @@ public class BookingTools {
         // CANCELLED), som spør tilstandsmaskinen og kaster ValidationException (ulovlig overgang)
         // eller NotFoundException (ukjent id). Begge får boble ut (T-04).
         return bookings.cancel(id);
+    }
+
+    // =================================================================================
+    // T-20 · Elicitation — serveren spør brukeren midt i verktøykallet
+    // =================================================================================
+
+    /**
+     * Skjemaet vi ber brukeren fylle ut. Recorden er <b>kontrakten mot mennesket</b>, ikke mot
+     * modellen: Spring AI genererer et JSON Schema av den og legger det i
+     * {@code requestedSchema} på {@code elicitation/create}, og hosten rendrer det som en
+     * dialog eller et skjema.
+     *
+     * <p><b>MCP tillater bare et flatt skjema med primitive felt</b> —
+     * {@code string}/{@code number}/{@code integer}/{@code boolean}, eventuelt en
+     * {@code enum} av strenger. Ingen nøstede objekter, ingen lister. Det er en langt
+     * strammere kontrakt enn {@code inputSchema} for et verktøy (som gjerne har nøstede
+     * records), og grunnen er praktisk: hosten skal kunne bygge et skjema av dette uten å vite
+     * noe om domenet vårt. SDK-en håndhever det — {@code McpAsyncServerExchange
+     * .createElicitation} validerer {@code requestedSchema} før den sender noe, så et nøstet
+     * felt her blir en feil på serveren, ikke en rar dialog hos brukeren.
+     *
+     * <p>{@code @JsonPropertyDescription} er teksten brukeren ser ved feltet. Alle felt er
+     * obligatoriske i skjemaet ({@code PROPERTY_REQUIRED_BY_DEFAULT = true} i Spring AI sin
+     * skjemagenerator, samme regel som for {@code @McpToolParam} i T-04), men merk at
+     * <em>ingen</em> validerer svaret for oss: kommer det tilbake uten {@code customerName},
+     * er feltet {@code null} i recorden. Derfor er {@code confirmed} en bokset
+     * {@link Boolean} og ikke en primitiv {@code boolean} — «ikke besvart» skal kunne skilles
+     * fra «svarte nei», selv om begge behandles likt.
+     */
+    public record BookingConfirmation(
+            @JsonPropertyDescription(
+                            "Fullt navn bookingen skal stå på, f.eks. «Ola Nordmann».")
+                    String customerName,
+            @JsonPropertyDescription(
+                            "Sett til «ja»/true for å bekrefte datoene og totalprisen over. "
+                                    + "Svarer du nei, opprettes ingen booking.")
+                    Boolean confirmed) {
+    }
+
+    /** Utfallet av et {@code create_booking_interactive}-kall. */
+    public enum InteractiveOutcome {
+        /** Brukeren bekreftet, og bookingen er opprettet. Se {@code booking}. */
+        BOOKED,
+        /** Brukeren avslo dialogen ({@code action: "decline"}). Ingenting er lagret. */
+        DECLINED,
+        /** Brukeren lukket dialogen uten å velge ({@code action: "cancel"}). */
+        CANCELLED,
+        /** Brukeren sendte inn skjemaet, men krysset ikke av for bekreftelse. */
+        NOT_CONFIRMED,
+        /** Klienten støtter ikke elicitation. Ingen dialog ble vist; se {@code message}. */
+        ELICITATION_NOT_SUPPORTED
+    }
+
+    /**
+     * Konvolutten {@code create_booking_interactive} returnerer. I motsetning til de andre
+     * booking-verktøyene kan dette verktøyet ende <em>godt</em> uten at det finnes en booking:
+     * at brukeren sier nei er et normalt utfall, ikke en feil. Derfor er svaret en konvolutt
+     * med et eksplisitt {@code outcome} — og ikke en {@code isError: true} — når ingenting ble
+     * lagret. Feil er fortsatt feil: ukjent reisemål, ugyldige datoer og manglende kapasitet
+     * bobler ut som før (T-04).
+     *
+     * @param outcome hva som skjedde — se {@link InteractiveOutcome}
+     * @param message én setning skrevet til modellen: hva den skal si eller gjøre videre
+     * @param quote   pristilbudet brukeren fikk se. Alltid med, uansett utfall, så modellen kan
+     *                oppsummere hva som ble avvist eller bekreftet
+     * @param booking den lagrede bookingen — {@code null} for alt annet enn {@code BOOKED}
+     */
+    public record InteractiveBookingResult(
+            InteractiveOutcome outcome, String message, Quote quote, Booking booking) {
+    }
+
+    /**
+     * Oppretter en booking <b>bare hvis brukeren bekrefter</b>, ved å be hosten om input midt i
+     * verktøykallet — MCP-primitiven <em>elicitation</em>.
+     *
+     * <h4>Hva elicitation er, og hvorfor det snur retningen</h4>
+     *
+     * <p>Alt annet i denne serveren er svar på spørsmål: hosten sender {@code tools/call}, vi
+     * svarer. Elicitation snur pilen. Midt inne i behandlingen av {@code tools/call} sender
+     * <em>serveren</em> en JSON-RPC-<b>request</b> den andre veien —
+     * {@code elicitation/create}, med sin egen {@code id} — og blir stående og vente på svaret
+     * fra hosten før den gjør ferdig verktøykallet. To forespørsler er altså i luften samtidig
+     * over den samme forbindelsen, i hver sin retning. Det er nettopp derfor JSON-RPC-{@code id}
+     * finnes (se T-00), og det er den mekanismen som gjør at en MCP-server kan involvere
+     * mennesket uten å ha noe brukergrensesnitt selv.
+     *
+     * <p>Merk hvem som svarer: {@code elicitation/create} går til <em>brukeren</em>, ikke til
+     * modellen. Hosten viser et skjema, mennesket fyller det ut, og svaret kommer tilbake som
+     * strukturerte data. Sammenlign med T-21 (sampling), der serveren spør <em>modellen</em>.
+     *
+     * <h4>Flyten</h4>
+     *
+     * <ol>
+     *   <li>Hent et pristilbud ({@link PricingService#quote}). Dette validerer reisemål, datoer
+     *       og antall reisende — og skriver ingenting. Er noe galt, feiler kallet <em>før</em>
+     *       brukeren plages med en dialog.
+     *   <li>Sjekk at klienten faktisk kan svare ({@code ctx.elicitEnabled()}).
+     *   <li>Spør brukeren: reisemål, datoer, netter og totalpris i klartekst, pluss et skjema
+     *       med navn og bekreftelse.
+     *   <li>Først <em>etter</em> et ja kalles {@link BookingService#createBooking}.
+     * </ol>
+     *
+     * <h4>Tre svar, ikke ett</h4>
+     *
+     * <p>{@code ElicitResult.action} har tre verdier, og alle tre må håndteres:
+     * {@code ACCEPT} (skjemaet ble sendt inn — innholdet ligger i {@code content}),
+     * {@code DECLINE} (brukeren sa nei) og {@code CANCEL} (brukeren lukket dialogen uten å
+     * velge). Bare {@code ACCEPT} har innhold; {@link StructuredElicitResult#structuredContent}
+     * er {@code null} for de to andre. Og {@code ACCEPT} betyr «skjemaet kom tilbake», ikke
+     * «ja» — brukeren kan ha sendt inn med bekreftelsen usatt, og da er utfallet
+     * {@link InteractiveOutcome#NOT_CONFIRMED}.
+     *
+     * <h4>Klienter uten elicitation: definert fallback, ikke feil</h4>
+     *
+     * <p>De fleste klienter støtter ikke elicitation (og en rå stdio-røyktest gjør det
+     * definitivt ikke). Kaller vi likevel, kaster Spring AI en {@code IllegalStateException} —
+     * «Elicitation not supported by the client» — som ville blitt en {@code isError: true} med
+     * et Java-klassenavn i. Verktøyet sjekker derfor {@code ctx.elicitEnabled()} <em>først</em>
+     * og faller tilbake på å levere pristilbudet med utfallet
+     * {@link InteractiveOutcome#ELICITATION_NOT_SUPPORTED}.
+     *
+     * <p>Valget mellom «tydelig feilmelding» og «definert fallback» falt på det siste, av tre
+     * grunner: (1) det <em>er</em> ingen feil — hverken argumentene eller serveren er gale, og
+     * {@code isError} bør bety at noe gikk galt; (2) arbeidet vi allerede har gjort er verdt
+     * noe, så modellen får pristilbudet i hånden og kan bekrefte med brukeren i chatten og
+     * deretter kalle {@code create_booking}; (3) degraderingen er ærlig og synlig — utfallet
+     * står i klartekst i svaret, og {@code booking} er {@code null}, så ingen kan forveksle det
+     * med en vellykket booking. Det som <em>ikke</em> ble vurdert som et alternativ, er å booke
+     * uten å spørre: da hadde verktøyet vært farligst nettopp der garantien manglet.
+     *
+     * <h4>{@code annotations}: nøyaktig de samme som {@code create_booking}</h4>
+     *
+     * <p>Det er poenget. Hintene beskriver <em>effekten på verden</em>, ikke
+     * samhandlingsmønsteret: verktøyet skriver fortsatt en rad ({@code readOnlyHint = false}),
+     * det er fortsatt et rent {@code INSERT} ({@code destructiveHint = false}), to kall gir
+     * fortsatt to bookinger ({@code idempotentHint = false}), og alt skjer fortsatt mot vår
+     * egen base ({@code openWorldHint = false}). At serveren <em>lover</em> å spørre først
+     * endrer ingenting hosten kan verifisere — og på fallback-veien spør den ikke i det hele
+     * tatt. En host skal derfor gate dette verktøyet like hardt som {@code create_booking};
+     * elicitation er et ekstra sikkerhetsnett, ikke en erstatning for hostens eget.
+     *
+     * <h4>To fallgruver</h4>
+     *
+     * <ul>
+     *   <li><b>20 sekunders tidsavbrudd.</b> Server→klient-forespørsler bruker
+     *       {@code spring.ai.mcp.server.request-timeout}, som er {@code 20s} som default. Et
+     *       menneske rekker sjelden å lese og fylle ut et skjema på 20 sekunder, så skru den
+     *       opp for interaktive verktøy. Tråden står og venter (kallet er synkront), men
+     *       henger ikke i det uendelige.
+     *   <li><b>Pristilbudet er ingen reservasjon.</b> Kapasiteten sjekkes av
+     *       {@link BookingService#createBooking} <em>etter</em> at brukeren har svart. Blir
+     *       plassene tatt i mellomtiden, feiler kallet med «Ikke nok kapasitet …» selv om
+     *       brukeren sa ja — som forventet, men verdt å vite når dialogen står oppe lenge.
+     * </ul>
+     */
+    @McpTool(
+            name = "create_booking_interactive",
+            title = "Opprett booking (med bekreftelse)",
+            description =
+                    """
+                    Oppretter en booking, men **spør brukeren først**: verktøyet regner ut \
+                    prisen, viser reisemål, datoer, netter og totalsum i en dialog, og lagrer \
+                    bookingen bare hvis brukeren bekrefter. Kundenavnet spør det om i samme \
+                    dialog — derfor er det ikke et argument her, og du skal **ikke** finne på \
+                    et navn.
+
+                    Bruk dette verktøyet når brukeren er klar til å booke og du vil ha en \
+                    eksplisitt bekreftelse på tall og datoer. Bruk `create_booking` når du \
+                    allerede har navnet og har fått bekreftelsen i samtalen — det er ett kall \
+                    uten dialog. Bruk `get_quote` når brukeren bare lurer på hva det koster.
+
+                    Svaret er alltid en konvolutt med `outcome`, `message`, `quote` \
+                    (pristilbudet brukeren fikk se) og `booking`. **Les `outcome` før du sier \
+                    noe til brukeren:**
+
+                    - `BOOKED` — bookingen er opprettet, og ligger i `booking` med `id`, \
+                    `status: PENDING` og `totalPrice`. Oppgi id-en til brukeren.
+                    - `DECLINED` — brukeren sa nei. **Ingenting er lagret.** Ikke prøv igjen \
+                    med de samme datoene; spør hva hen vil endre.
+                    - `CANCELLED` — brukeren lukket dialogen uten å svare. Ingenting er \
+                    lagret. Spør om hen fortsatt vil booke.
+                    - `NOT_CONFIRMED` — skjemaet kom tilbake uten bekreftelse. Ingenting er \
+                    lagret. Behandle det som et nei.
+                    - `ELICITATION_NOT_SUPPORTED` — klienten kan ikke vise dialogen, så \
+                    **ingen ble spurt og ingenting er lagret**. `quote` er likevel gyldig: \
+                    gjenta datoene og totalprisen for brukeren, spør om navn og bekreftelse i \
+                    chatten, og kall `create_booking` med svaret.
+
+                    `booking` er `null` i alle tilfeller unntatt `BOOKED` — det er den sikre \
+                    sjekken på om noe faktisk ble lagret. Kall verktøyet **én gang** per \
+                    opphold: to kall som begge bekreftes gir to bookinger. Ugyldige datoer, \
+                    ukjent reisemål og for få ledige plasser gir en vanlig feilmelding, ikke \
+                    en av verdiene over.""",
+            annotations =
+                    @McpTool.McpAnnotations(
+                            title = "Opprett booking (med bekreftelse)",
+                            readOnlyHint = false,
+                            destructiveHint = false,
+                            idempotentHint = false,
+                            openWorldHint = false))
+    public InteractiveBookingResult createBookingInteractive(
+            // Infrastrukturparameter: Spring AI fyller den inn selv og holder den UTE av
+            // inputSchema (McpJsonSchemaGenerator hopper over McpSyncRequestContext,
+            // McpSyncServerExchange, McpTransportContext m.fl.). Modellen ser den altså ikke.
+            // Merk at den bare finnes i en *stateful* server — STREAMABLE eller stdio. Med
+            // spring.ai.mcp.server.protocol=STATELESS kaster Spring AI ved oppstart:
+            // «Stateless tool methods do not support McpSyncRequestContext parameter.»
+            McpSyncRequestContext ctx,
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Id-en til reisemålet, slik den kommer fra \
+                                    `list_destinations` eller `search_destinations`. En ukjent \
+                                    id gir en feil, og ingen dialog vises.""")
+                    long destinationId,
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Innsjekksdato på ISO-8601-formatet yyyy-MM-dd, f.eks. \
+                                    «2026-07-01». Må være før til-datoen. Datoen vises til \
+                                    brukeren i bekreftelsesdialogen, så den skal være den du \
+                                    faktisk mener — ikke en gjetning.""")
+                    LocalDate from,
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Utsjekksdato på ISO-8601-formatet yyyy-MM-dd, f.eks. \
+                                    «2026-07-10». Må være etter fra-datoen. Regnes som \
+                                    utsjekksdag og faktureres ikke, så 1. til 10. er ni \
+                                    netter.""")
+                    LocalDate to,
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Antall reisende, minst 1. Påvirker både prisen som vises i \
+                                    dialogen og hvor mange plasser som beslaglegges — spør \
+                                    brukeren hvis det ikke er oppgitt, ikke gjett.""")
+                    int numTravelers) {
+
+        // 1) Pristilbudet FØRST. PricingService validerer reisemål, datoer og antall reisende
+        //    og skriver ingenting; feil bobler ut som vanlig (T-04). Poenget er rekkefølgen:
+        //    er kallet ugyldig, skal brukeren aldri se en dialog.
+        Quote quote = pricing.quote(destinationId, from, to, numTravelers);
+
+        // 2) Har klienten i det hele tatt en mottaker? elicitEnabled() ser på
+        //    ClientCapabilities fra initialize-håndtrykket. Uten sjekken ville Spring AI
+        //    kastet IllegalStateException.
+        if (!ctx.elicitEnabled()) {
+            return new InteractiveBookingResult(
+                    InteractiveOutcome.ELICITATION_NOT_SUPPORTED,
+                    """
+                    Klienten støtter ikke elicitation, så ingen bekreftelsesdialog kunne \
+                    vises, og ingen booking er opprettet. Pristilbudet i `quote` er gyldig: \
+                    gjenta datoene og totalprisen for brukeren, spør om navnet bookingen skal \
+                    stå på, og kall `create_booking` når du har fått bekreftelsen i chatten.""",
+                    quote,
+                    null);
+        }
+
+        // 3) Spør brukeren. Kallet BLOKKERER til hosten svarer (eller til
+        //    spring.ai.mcp.server.request-timeout løper ut, default 20s).
+        StructuredElicitResult<BookingConfirmation> answer =
+                ctx.elicit(spec -> spec.message(confirmationMessage(quote)), BookingConfirmation.class);
+
+        // 4) Alle tre utfallene. switch-en er uttømmende over enum-et, så en ny verdi i
+        //    SDK-en ville blitt en kompileringsfeil framfor en stille «ingenting skjedde».
+        return switch (answer.action()) {
+            case ACCEPT -> bookIfConfirmed(
+                    answer.structuredContent(), quote, destinationId, from, to, numTravelers);
+            case DECLINE -> new InteractiveBookingResult(
+                    InteractiveOutcome.DECLINED,
+                    "Brukeren avslo bookingen i dialogen. Ingenting er lagret. Ikke prøv igjen "
+                            + "med de samme opplysningene — spør hva som skal endres.",
+                    quote,
+                    null);
+            case CANCEL -> new InteractiveBookingResult(
+                    InteractiveOutcome.CANCELLED,
+                    "Brukeren lukket dialogen uten å svare. Ingenting er lagret. Spør om hen "
+                            + "fortsatt vil booke oppholdet.",
+                    quote,
+                    null);
+        };
+    }
+
+    /**
+     * {@code ACCEPT} betyr «skjemaet kom tilbake», ikke «ja». Brukeren kan ha sendt det inn med
+     * bekreftelsen usatt — og siden ingen validerer svaret for oss, kan feltene i teorien være
+     * {@code null}. Begge deler behandles som et nei.
+     *
+     * <p>Er svaret et ja, går vi videre til {@link BookingService#createBooking} med navnet
+     * brukeren selv skrev. Kapasitetssjekken skjer der, altså <em>etter</em> bekreftelsen; blir
+     * plassene tatt mens dialogen står oppe, feiler kallet med «Ikke nok kapasitet …». Det er
+     * riktig oppførsel — et pristilbud er ingen reservasjon — men verdt å kjenne til. Et blankt
+     * navn stoppes av tjenesten med «kundenavn må oppgis»; vi gjentar ikke den regelen her.
+     */
+    private InteractiveBookingResult bookIfConfirmed(
+            BookingConfirmation confirmation,
+            Quote quote,
+            long destinationId,
+            LocalDate from,
+            LocalDate to,
+            int numTravelers) {
+
+        if (confirmation == null || !Boolean.TRUE.equals(confirmation.confirmed())) {
+            return new InteractiveBookingResult(
+                    InteractiveOutcome.NOT_CONFIRMED,
+                    "Brukeren sendte inn skjemaet uten å bekrefte. Ingenting er lagret. "
+                            + "Behandle det som et nei, og spør hva som eventuelt skal endres.",
+                    quote,
+                    null);
+        }
+
+        Booking booking =
+                bookings.createBooking(
+                        confirmation.customerName(), destinationId, from, to, numTravelers);
+
+        return new InteractiveBookingResult(
+                InteractiveOutcome.BOOKED,
+                "Brukeren bekreftet, og bookingen er opprettet med status PENDING. "
+                        + "Oppgi id-en til brukeren.",
+                quote,
+                booking);
+    }
+
+    /**
+     * Teksten mennesket leser i dialogen. Dette er det ene stedet i {@code tools/}-laget der
+     * formatering hører hjemme: mottakeren er en person, ikke en modell, og det finnes ingen
+     * JSON-serialisering å lene seg på (jf. samme resonnement for {@code resources/} i T-13).
+     * Alle tallene brukeren skal si ja til står her — reisemål, datoer, netter, reisende, pris
+     * per natt og totalsum — for det er nettopp de tallene bekreftelsen gjelder.
+     */
+    private static String confirmationMessage(Quote quote) {
+        return """
+                Bekreft bookingen:
+
+                Reisemål: %s (%s)
+                Innsjekk: %s
+                Utsjekk:  %s
+                Netter:   %d
+                Reisende: %d
+                Pris:     %s kr per natt
+
+                Totalt:   %s kr
+
+                Fyll inn navnet bookingen skal stå på, og bekreft. Sier du nei, opprettes ingen \
+                booking."""
+                .formatted(
+                        quote.destination().name(),
+                        quote.destination().country(),
+                        quote.from(),
+                        quote.to(),
+                        quote.nights(),
+                        quote.numTravelers(),
+                        kroner(quote.pricePerNight()),
+                        kroner(quote.totalPrice()));
+    }
+
+    /** «14800» framfor «14800.0» — hele kroner når beløpet er helt, ellers to desimaler. */
+    private static String kroner(double amount) {
+        return amount == Math.rint(amount)
+                ? String.format(Locale.ROOT, "%.0f", amount)
+                : String.format(Locale.ROOT, "%.2f", amount);
     }
 }

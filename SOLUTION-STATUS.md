@@ -30,7 +30,7 @@ etterpå. Én commit per oppgave.
 | T-17 | Streamable HTTP-transport | ✅ | **Ingen Java-kode** — kun bygg og konfigurasjon. `spring-ai-starter-mcp-server-webmvc` lagt til *ved siden av* stdio-starteren, og transporten slås om med Spring-profilen `http` (ny fil `src/main/resources/application-http.properties`). Uten profil: uendret stdio-server, ingen Tomcat (`spring.main.web-application-type=none`). Med profil: Streamable HTTP på `POST http://localhost:8080/mcp`. `logback-spring.xml` bytter konsoll-appenderen fra stderr til **stdout** i `http`-profilen, siden protokollen ikke eier stdout lenger. Begge transportene verifisert gjennom protokollen; alle 135 tester uendret grønne ([se under](#t-17--streamable-http-transport)) |
 | T-18 | Bearer-token-auth | ✅ | Én ny fil: `config/BearerTokenAuthFilter.java` — et `OncePerRequestFilter` med `@Profile("http")`, **ingen ny avhengighet** (Spring Security valgt bort, begrunnet under). Krever `Authorization: Bearer <token>` på alle forespørsler; avviser med `401` + `WWW-Authenticate` (ikke `403`, ikke stacktrace) før JSON-RPC i det hele tatt starter. Tokenet konfigureres med `workshop.http.auth.token` / `WORKSHOP_HTTP_AUTH_TOKEN`; står det tomt **genererer** serveren ett og logger det, så endepunktet aldri er åpent ved et uhell (tredje vei mellom «nekt å starte» og «kjør åpent med WARN»). stdio-modus er bit for bit uendret — filteret opprettes ikke uten profilen; alle 135 tester uendret grønne ([se under](#t-18--bearer-token-auth)) |
 | T-19 | Koble Claude til remote-serveren | ✅ | **Ingen kodeendring** — kun README. HTTP-varianten registrert i Claude Code og verifisert **ende-til-ende**: `claude mcp add --transport http vacation-booking-http http://localhost:8080/mcp --header "Authorization: Bearer …"` → `✔ Connected`, og `about_application` faktisk kalt gjennom hosten over HTTP med token. Syntaksen er lest ut av `claude mcp add --help` (v2.1.233), ikke gjengitt fra hukommelsen; JSON-formen `{"type":"http","url":…,"headers":{…}}` verifisert med `add-json`, og `${MILJØVARIABEL}`-ekspansjon i header-verdien bekreftet begge veier. Funnet som forklarer T-18-designet: **uten** `--header` tolker hosten vårt `401` som en OAuth-utfordring og prøver `/.well-known/*` + `POST /register` — filteret vårt stopper alt, og hosten gir opp med «Dynamic Client Registration rejected». Claude Desktop tar ikke remote-servere i `claude_desktop_config.json` (kun Connectors + OAuth, ingen header-felt) — dokumentert ærlig, med `mcp-remote`-broen som verifisert omvei. Brukerens stdio-registrering urørt, alle testregistreringer fjernet, ingen serverprosess igjen; 135 tester uendret grønne ([se under](#t-19--koble-claude-til-remote-serveren)). **Epic 7 ferdig.** |
-| T-20 | Elicitation (bonus) | ⬜ | — |
+| T-20 | Elicitation (bonus) | ✅ | `create_booking_interactive` lagt til i `tools/BookingTools.java` — det første verktøyet der **serveren** sender en JSON-RPC-*request* den andre veien (`elicitation/create`) midt inne i et `tools/call`, og venter på svar fra mennesket før den skriver. Kanalen er en `McpSyncRequestContext`-parameter Spring AI fyller inn selv og **holder ute av `inputSchema`**. `create_booking` (T-07) står urørt ved siden av, så de to kan sammenlignes. Skjemaet er den flate recorden `BookingConfirmation` (bare primitiver — MCP tillater ikke mer), og kundenavnet spørres *brukeren* om i stedet for å være et verktøyargument modellen kan finne på. Alle tre utfallene i spesifikasjonen håndteres (`accept`/`decline`/`cancel`), pluss fella «accept betyr at skjemaet kom tilbake, ikke ja». Klienter **uten** elicitation får en definert fallback, ikke en feil: pristilbudet + `outcome: ELICITATION_NOT_SUPPORTED` + beskjed om å bruke `create_booking`. `annotations` er ordrett de samme som T-07 — med vilje. Verifisert ende-til-ende gjennom protokollen med en egen MCP-klient som faktisk svarer (alle fem utfall + 20s-tidsavbruddet), og bekreftet at forespørselen når **Claude Code 2.1.233**, som svarer `cancel` i ikke-interaktiv `-p`-modus; 10 nye tester (145 totalt) ([se under](#t-20--elicitation)) |
 | T-21 | Sampling (bonus) | ⬜ | — |
 
 ## Beslutninger som gjelder hele løsningen
@@ -242,6 +242,35 @@ JSON-RPC-`error`), men skiller seg på to punkter som er lette å gå på:
   `booking://{id}` som en `EmbeddedResource` med markdown-en fra `BookingResources.booking(...)`.
   Gjenbruk koden, ikke teksten. Se [T-15](#t-15--prompts) for hvorfor `EmbeddedResource` slo både
   `ResourceLink` og «bare skriv URI-en i teksten».
+
+### Når serveren spør tilbake (avgjort i T-20 — gjelder også T-21)
+
+Gjelder T-20 ✅ og er premisset for T-21 (sampling), som bruker nøyaktig samme mekanisme.
+Alt er verifisert mot den ekte JSON-en; tracen ligger i [T-20-seksjonen](#t-20--elicitation).
+
+- **Kanalen er en ekstra parameter på verktøymetoden.** Ta imot en
+  `org.springframework.ai.mcp.annotation.context.McpSyncRequestContext`. Spring AI fyller den
+  inn selv (`AbstractMcpToolMethodCallback.buildMethodArguments`) og **utelater den fra
+  `inputSchema`** (`McpJsonSchemaGenerator`), så modellen ser den ikke. Samme gjelder
+  `McpSyncServerExchange`, `McpTransportContext`, `CallToolRequest` og `McpMeta`. Kontekst-objektet
+  er det bekvemme laget: `ctx.elicit(...)`, `ctx.sample(...)`, `ctx.roots()`, `ctx.progress(...)`,
+  `ctx.info(...)` — alt sammen tynne innpakninger rundt `McpSyncServerExchange`.
+- **Det virker bare i en *stateful* server.** stdio og `protocol=STREAMABLE` er greit;
+  `protocol=STATELESS` gir «Stateless tool methods do not support McpSyncRequestContext
+  parameter.». Det er ikke en tilfeldighet: uten en sesjon finnes det ingen forbindelse å sende
+  en request tilbake over.
+- **Sjekk capability før du spør — alltid.** `ctx.elicitEnabled()` / `ctx.sampleEnabled()` leser
+  `ClientCapabilities` fra `initialize`-håndtrykket. Hopper du over sjekken, kaster Spring AI en
+  `IllegalStateException` som havner ut som `isError: true` med et Java-klassenavn i teksten.
+  De fleste klienter støtter ikke dette, så veien uten støtte er **hovedveien**, ikke kantsaken.
+- **Kallet blokkerer, og tidsavbruddet er 20 sekunder.** Server→klient-forespørsler bruker
+  `spring.ai.mcp.server.request-timeout` (default `20s`). Går den ut, får verktøykallet
+  `isError: true` med `Did not observe any item or terminal signal within 20000ms …`. Et menneske
+  rekker sjelden å lese og fylle ut et skjema på 20 sekunder — skru den opp for interaktive
+  verktøy.
+- **Et «nei» fra brukeren er ikke en feil.** Returner en konvolutt med et eksplisitt utfall i
+  stedet for å kaste. `isError` bør bety at noe gikk *galt*; at mennesket sa nei er et normalt
+  utfall av et interaktivt verktøy. Feil er fortsatt feil og bobler som før (T-04).
 
 ---
 
@@ -3648,3 +3677,350 @@ til user- eller project-scope, så `.mcp.json` finnes fortsatt ikke i repoet.
 **5. `vacation.db` er uendret.** Sikkerhetskopiert til scratchpad før kjøringen; SHA-256 er
 identisk før og etter (`4f49ce48…`). Alle kall var lesende. Hjelpefiler og serverlogger lå i
 scratchpad-katalogen, ikke i repoet.
+
+### T-20 · Elicitation
+
+Første bonusoppgave. Én fil endret i produksjonskoden — `tools/BookingTools.java` — som har fått
+et sjette verktøy, `create_booking_interactive`, pluss to nye typer (`BookingConfirmation`,
+`InteractiveBookingResult`) og en ny konstruktør-avhengighet (`PricingService`). **`create_booking`
+fra T-07 er ikke rørt**, med vilje: de to ligger nå ved siden av hverandre i samme fil, og
+forskjellen mellom dem *er* pensum.
+
+#### Hva elicitation er — og hvorfor det snur retningen på kommunikasjonen
+
+Alt annet i denne serveren er svar på spørsmål. Hosten sender `tools/list`, `tools/call`,
+`resources/read`, `prompts/get` — vi svarer. Serveren er ren respondent, og har ingen måte å ta
+initiativ på.
+
+Elicitation snur pilen. Midt inne i behandlingen av et `tools/call` sender **serveren** en
+JSON-RPC-*request* den andre veien — `elicitation/create`, med sin egen `id` — og blir stående og
+vente på svaret før den gjør verktøykallet ferdig:
+
+```
+klient                                        server
+  │  {"id":3,"method":"tools/call", …}          │
+  │ ──────────────────────────────────────────► │   create_booking_interactive starter
+  │                                             │   … henter pristilbud …
+  │  {"id":7,"method":"elicitation/create", …}  │
+  │ ◄────────────────────────────────────────── │   ← SERVEREN spør. Kallet står og venter.
+  │        (hosten viser et skjema til          │
+  │         mennesket og venter på svar)        │
+  │  {"id":7,"result":{"action":"accept", …}}   │
+  │ ──────────────────────────────────────────► │   … og først NÅ opprettes bookingen
+  │  {"id":3,"result":{ … }}                    │
+  │ ◄────────────────────────────────────────── │
+```
+
+Legg merke til at **to forespørsler er i luften samtidig over den samme forbindelsen, i hver sin
+retning**. Det er nettopp derfor JSON-RPC har en `id` (T-00, spørsmål 1): uten den hadde det ikke
+vært mulig å pare svarene. `tools/call` med `id: 3` ligger og venter mens `elicitation/create` med
+`id: 0` går motsatt vei og får sitt eget svar. MCP er ikke en request/response-API med en klient og
+en server — det er to likeverdige JSON-RPC-parter som begge kan sende requests.
+
+Tre ting følger av det, og de er hele poenget for en deltaker:
+
+1. **En MCP-server kan involvere mennesket uten å ha et brukergrensesnitt.** Vi eier ikke chatten,
+   vi har ingen skjerm, og vi vet ikke om brukeren sitter i Claude Code, Claude Desktop eller en
+   egenbygd host. Vi sender et *skjema* — en melding og et JSON Schema — og hosten rendrer det slik
+   den vil. Presentasjonen er hostens ansvar, innholdet er vårt.
+2. **Mottakeren er brukeren, ikke modellen.** Det er den viktigste forskjellen mot T-21 (sampling),
+   som bruker nøyaktig samme mekanisme, men spør *modellen*. Her kommer svaret fra et menneske, og
+   det er derfor `customerName` ble flyttet ut av verktøyargumentene: en modell kan finne på et
+   navn, et menneske vet hva det heter.
+3. **Kontrollen blir liggende hos hosten.** Vi kan ikke tvinge fram et svar. Hosten kan la være å
+   annonsere capability-en i det hele tatt, den kan svare `decline` eller `cancel` uten å spørre
+   noen, og den kan bruke så lang tid den vil (til vårt tidsavbrudd slår inn). Serveren *ber*, den
+   krever ikke.
+
+#### Slik eksponerer Spring AI 2.0 det
+
+Lest ut av kildene (`spring-ai-mcp-annotations-2.0.0-sources.jar` og `mcp-core-2.0.0-sources.jar`),
+ikke gjettet:
+
+- **Legg til en parameter av typen
+  `org.springframework.ai.mcp.annotation.context.McpSyncRequestContext`.** Det er alt.
+  `AbstractMcpToolMethodCallback.buildMethodArguments` gjenkjenner typen og fyller den inn i stedet
+  for å lete etter et argument med det navnet, og `McpJsonSchemaGenerator` hopper over den når den
+  bygger `inputSchema`. Modellen ser den altså aldri — verifisert i `tools/list` under.
+  Alternativet er den råere `McpSyncServerExchange` (samme behandling), som kontekst-objektet er
+  et bekvemmelighetslag oppå: `DefaultMcpSyncRequestContext` delegerer til
+  `exchange.createElicitation(...)`.
+- **Sjekk `ctx.elicitEnabled()`** — den ser om `ClientCapabilities.elicitation()` fra
+  `initialize`-håndtrykket er noe annet enn `null`.
+- **Spør med `ctx.elicit(spec -> spec.message("…"), Bekreftelse.class)`.** Spring AI genererer et
+  JSON Schema av klassen (`McpJsonSchemaGenerator.generateFromType`, deretter fjernes `$schema` —
+  elicitation-skjemaet tillater det ikke), pakker det i en `ElicitFormRequest` og sender.
+  Svaret deserialiseres tilbake til klassen din og kommer som en
+  `StructuredElicitResult<T>(action, structuredContent, meta)`.
+- **`structuredContent` er `null` for alt annet enn `ACCEPT`.** Det er ikke en kantsak — det er to
+  av tre utfall.
+- **Uten capability kaster `elicit(...)`** `IllegalStateException("Elicitation not supported by the
+  client: …")`. Derfor sjekker vi selv først; se fallback-avsnittet.
+- **Bare i en stateful server.** `SyncStatelessMcpToolMethodCallback.createRequestContext` kaster
+  «Stateless tool methods do not support McpSyncRequestContext parameter.» Vår oppsett (stdio, og
+  `protocol=STREAMABLE` i `http`-profilen fra T-17) er stateful, så begge transportene virker.
+
+#### Verktøyet: hva som faktisk ble laget
+
+`create_booking_interactive(destinationId, from, to, numTravelers)` — **fire** argumenter der
+`create_booking` har fem. Det femte, `customerName`, er borte fra skjemaet og spørres brukeren om
+i dialogen i stedet. Det er den mest lærerike enkeltendringen i oppgaven: T-07 måtte skrive
+«Spør brukeren om navnet — ikke finn på et» i `description` og håpe at modellen adlyder;
+her er det ikke mulig å finne på et navn, fordi feltet ikke finnes i `inputSchema`.
+
+Rekkefølgen i metoden er en del av designet:
+
+1. `PricingService.quote(...)` **først**. Den validerer reisemål, datoer og antall reisende, og
+   skriver ingenting. Er kallet ugyldig, feiler det *før* et menneske plages med en dialog.
+2. `ctx.elicitEnabled()`.
+3. `ctx.elicit(...)` med en melding som inneholder alle tallene brukeren skal si ja til.
+4. `BookingService.createBooking(...)` — **bare** ved et ja.
+
+Svaret er en konvolutt, `InteractiveBookingResult(outcome, message, quote, booking)`, med fem
+mulige `outcome`. Konvolutten finnes fordi verktøyet kan ende *godt* uten at det finnes en
+booking, og `booking: null` er den maskinlesbare sjekken på om noe ble lagret.
+
+#### Elicitation-skjemaet: flatt, og bare primitiver
+
+Dette er den strammeste kontrakten i hele MCP. `requestedSchema` tillater **bare felt på øverste
+nivå**, med typene `string`, `number`, `integer`, `boolean` og `enum` av strenger. Ingen nøstede
+objekter, ingen lister. Grunnen er praktisk: hosten skal kunne bygge et skjema av dette uten å vite
+noe som helst om domenet vårt.
+
+Recorden vår har derfor to felt, og `@JsonPropertyDescription` er teksten mennesket ser ved hvert
+av dem. Dette er den **faktiske** JSON-en fra `elicitation/create`, fanget av en klient som svarer
+(se verifiseringen):
+
+```jsonc
+{
+  "_meta": {},
+  "mode": "form",
+  "message": "Bekreft bookingen:\n\nReisemål: Kyoto Machiya (Japan)\nInnsjekk: 2026-10-05\nUtsjekk:  2026-10-08\nNetter:   3\nReisende: 2\nPris:     1600 kr per natt\n\nTotalt:   9600 kr\n\nFyll inn navnet bookingen skal stå på, og bekreft. Sier du nei, opprettes ingen booking.",
+  "requestedSchema": {
+    "type": "object",
+    "properties": {
+      "confirmed":    {"type": "boolean", "description": "Sett til «ja»/true for å bekrefte …"},
+      "customerName": {"type": "string",  "description": "Fullt navn bookingen skal stå på, …"}
+    },
+    "required": ["confirmed", "customerName"]
+  }
+}
+```
+
+Fire ting å merke seg:
+
+- **`mode: "form"`.** Spesifikasjonen har også `mode: "url"` (send brukeren til en nettside), som
+  Spring AI støtter via `ElicitUrlRequest`. Claude Code annonserer
+  `Elicitation[form=null, url=null]`, og SDK-en tolker det som «form støttes»
+  (`McpAsyncServerExchange`: `supportsForm = form != null || url == null`).
+- **`$schema` er borte.** `DefaultMcpSyncRequestContext.generateElicitSchema` fjerner nøkkelen
+  eksplisitt, fordi elicitation-skjemaet ikke tillater den. Sammenlign med et verktøys
+  `inputSchema`, som *har* den.
+- **Alle felt er obligatoriske som default**, samme regel som `@McpToolParam` i T-04
+  (`PROPERTY_REQUIRED_BY_DEFAULT = true`).
+- **`required` håndheves ikke av oss.** SDK-en validerer at *skjemaet* er lovlig før den sender
+  (`jsonSchemaValidator.assertConforms`), men ingen validerer *svaret* — derfor er `confirmed` en
+  bokset `Boolean` i recorden, og derfor sjekker koden for `null`.
+- **Meldingen bærer tallene, ikke skjemaet.** Reisemål, datoer, netter, reisende, pris per natt og
+  totalsum står i `message`, for det er de tallene bekreftelsen gjelder. Et «Bekrefter du?» uten
+  tall er en bekreftelse på ingenting.
+
+#### Tre svar — og fella det fjerde
+
+`ElicitResult.action` har tre verdier, og alle tre er verifisert gjennom protokollen:
+
+| `action` | Hva det betyr | Vårt `outcome` | Lagres noe? |
+|---|---|---|---|
+| `accept` | Skjemaet ble sendt inn; `content` har svaret | `BOOKED` | ja |
+| `decline` | Brukeren sa aktivt nei | `DECLINED` | nei |
+| `cancel` | Dialogen ble lukket uten et valg | `CANCELLED` | nei |
+
+Skillet mellom `decline` og `cancel` er reelt og verdt å beholde: «nei takk» er en beslutning,
+«lukket vinduet» er det ikke — modellen bør spørre igjen i det ene tilfellet og ikke i det andre,
+og det står i `description`.
+
+**Fella:** `accept` betyr «skjemaet kom tilbake», ikke «ja». Brukeren kan sende inn med
+bekreftelsen usatt, og siden ingen validerer svaret kan feltet også mangle helt. Begge behandles
+som et nei, med et eget utfall `NOT_CONFIRMED`, slik at modellen kan skille «brukeren fylte ut
+skjemaet men bekreftet ikke» fra «brukeren avviste dialogen».
+
+#### Klienter uten elicitation: definert fallback, ikke feilmelding
+
+De fleste klienter støtter ikke elicitation, og en rå stdio-røyktest gjør det definitivt ikke.
+Uten en `elicitEnabled()`-sjekk ville Spring AI kastet `IllegalStateException`, og modellen fått
+`Error invoking method: createBookingInteractive\nElicitation not supported by the client: …` — et
+Java-klassenavn og ingen vei videre.
+
+Oppgaven ga to lovlige svar (tydelig feilmelding, eller definert fallback). **Fallback ble valgt**,
+av tre grunner:
+
+1. **Det er ikke en feil.** Hverken argumentene, serveren eller forespørselen er gale — klienten
+   mangler bare en valgfri capability. `isError: true` bør bety at noe gikk galt, og en modell som
+   ser en feil har lett for å prøve igjen.
+2. **Arbeidet er allerede gjort.** Pristilbudet er hentet og validert. Å kaste det er å tvinge
+   fram et nytt `get_quote`-kall for ingenting.
+3. **Degraderingen er ærlig og synlig.** `outcome: ELICITATION_NOT_SUPPORTED` står i klartekst,
+   `booking` er `null`, og `message` sier hva modellen skal gjøre i stedet: gjenta datoene og
+   totalprisen for brukeren, spør om navnet i chatten, og kall `create_booking`. Verktøyet
+   degraderer altså til «et `get_quote` med en instruksjon» — som er nøyaktig så mye som er mulig
+   uten en dialog.
+
+Det som **ikke** ble vurdert som et alternativ: å booke uten å spørre. Da hadde verktøyet vært
+farligst nettopp der garantien manglet, og hele poenget med det hadde forsvunnet.
+
+#### `annotations`: ordrett de samme som `create_booking` — og det er svaret
+
+```jsonc
+// create_booking (T-07)                        // create_booking_interactive (T-20)
+"readOnlyHint": false,                          // "readOnlyHint": false,
+"destructiveHint": false,                       // "destructiveHint": false,
+"idempotentHint": false,                        // "idempotentHint": false,
+"openWorldHint": false                          // "openWorldHint": false
+```
+
+Oppgaven ber om at man tenker gjennom om hintene endrer seg. Svaret er nei, og begrunnelsen er
+verdt mer enn selve svaret: **hintene beskriver effekten på verden, ikke samhandlingsmønsteret.**
+
+- `readOnlyHint` er fortsatt `false`: verktøyet kan skrive en rad. At det spør først endrer ikke
+  *om* det skriver.
+- `destructiveHint` er fortsatt `false`: det er fortsatt et rent `INSERT`.
+- `idempotentHint` er fortsatt `false`: to kall som begge bekreftes gir to bookinger. Dialogen gir
+  ingen idempotensnøkkel.
+- `openWorldHint` er fortsatt `false`. Fristelsen er å sette den til `true` fordi kallet nå snakker
+  med noen utenfor serveren — men spesifikasjonen mener «et åpent sett av eksterne entiteter»
+  (nettsøk, tredjeparts-API), ikke «hosten som allerede er i den andre enden av forbindelsen».
+  Domenet er fortsatt et lukket sett reisemål i vår egen SQLite-base.
+
+Det praktiske poenget: **en host skal gate dette verktøyet nøyaktig like hardt som
+`create_booking`.** Serverens løfte om å spørre først er ikke noe hosten kan verifisere, og på
+fallback-veien spør serveren ikke i det hele tatt. Elicitation er et ekstra sikkerhetsnett *i
+tillegg til* hostens eget, aldri en erstatning.
+
+#### Verifisering
+
+**1. `./gradlew build` grønt — 145 tester** (135 fra før + 10 nye i `BookingToolsTest`), 0 feil.
+
+**2. stdio-røyktest, klient uten elicitation.** Samme håndtrykk som T-00 (`"capabilities":{}`),
+deretter `tools/list` og to `tools/call`. Stderr:
+`Tilgjengelige MCP-tools (12): [… create_booking_interactive …]`.
+
+`inputSchema` bekrefter at kontekst-parameteren er usynlig for modellen — fire felt, ingen `ctx`,
+og **ingen `customerName`**:
+
+```jsonc
+"required": ["destinationId", "from", "to", "numTravelers"]
+```
+
+Kallet mot en klient uten elicitation ga **ingen stacktrace og ingen hengende forespørsel**, men
+den definerte fallbacken (forkortet):
+
+```jsonc
+{"content":[{"type":"text","text":"{\"outcome\":\"ELICITATION_NOT_SUPPORTED\",\"message\":\"Klienten støtter ikke elicitation, … kall `create_booking` …\",\"quote\":{…,\"totalPrice\":9600.0},\"booking\":null}"}],"isError":false}
+```
+
+Merk `isError: false`. Et ugyldig kall (`from` etter `to`) gikk derimot rett i den vanlige
+feilkanalen fra T-04, **uten** at noen dialog ble forsøkt:
+`{"content":[{"type":"text","text":"Error invoking method: createBookingInteractive\nfra-dato må være før til-dato"}],"isError":true}`.
+
+**3. Ende-til-ende med en klient som faktisk svarer.** Røyktesten kan ikke svare på
+`elicitation/create`, så det ble skrevet en 50 linjers MCP-klient i Node
+(`@modelcontextprotocol/sdk` 1.30.0) som annonserer `capabilities: {elicitation: {}}`, skriver ut
+forespørselen den får, og svarer med den handlingen som gis på kommandolinja. Klienten ligger i
+scratchpad, ikke i repoet. Alle fem utfall er kjørt gjennom den ekte protokollen:
+
+| Klientens svar | `outcome` | `booking` | `isError` |
+|---|---|---|---|
+| `{"action":"accept","content":{"customerName":"Kari Nordmann","confirmed":true}}` | `BOOKED` | `{"id":1,…,"status":"PENDING","totalPrice":9600.0}` | `false` |
+| `{"action":"accept","content":{… ,"confirmed":false}}` | `NOT_CONFIRMED` | `null` | `false` |
+| `{"action":"decline"}` | `DECLINED` | `null` | `false` |
+| `{"action":"cancel"}` | `CANCELLED` | `null` | `false` |
+| svarer aldri | — | — | `true`, se under |
+
+Det er `elicitation/create`-JSON-en fra denne klienten som er gjengitt i skjema-avsnittet over.
+
+**4. Tidsavbruddet, målt.** Med en klient som bare lar være å svare, kom svaret etter **20
+sekunder**:
+
+```jsonc
+{"content":[{"type":"text","text":"Error invoking method: createBookingInteractive\nDid not observe any item or terminal signal within 20000ms in 'source(MonoCreate)' (and no fallback has been configured)"}],"isError":true}
+```
+
+Altså: kallet henger **ikke** i det uendelige, men 20 sekunder er for kort for et menneske som
+skal lese en dialog og skrive inn et navn. `spring.ai.mcp.server.request-timeout` bør skrus opp
+for interaktive verktøy. Meldingen er Reactor sin og kan vi ikke styre — samme kosmetiske støy som
+T-04/T-05 allerede har akseptert.
+
+**5. Ende-til-ende mot Claude Code (2.1.233), over HTTP.** Serveren ble startet med
+`--spring.profiles.active=http` (T-17) og et bearer-token (T-18), registrert med
+`claude mcp add-json vb-t20 '{"type":"http", …}'` → `✔ Connected`, og verktøyet kalt med
+`claude -p … --allowedTools "mcp__vb-t20__create_booking_interactive"`.
+
+Hosten annonserte capability-en, slik T-19 fant:
+
+```
+Capabilities: ClientCapabilities[… sampling=null, elicitation=Elicitation[form=null, url=null]],
+Info: Implementation[name=claude-code, title=Claude Code, version=2.1.233, …]
+```
+
+**Forespørselen nådde hosten, og hosten svarte** — ordrett fra økten:
+
+```json
+{"outcome":"CANCELLED","message":"Brukeren lukket dialogen uten å svare. …","quote":{…,"totalPrice":9600.0},"booking":null}
+```
+
+Det er funnet: **en ikke-interaktiv `claude -p`-økt kan ikke svare på en elicitation, og svarer
+`cancel`.** Det er verdt å understreke at dette er et *ekte* svar og ikke et tidsavbrudd: et
+tidsavbrudd ville gitt `isError: true` (punkt 4), mens dette er et vanlig `result`. Serverloggen
+har heller ingen «missing required field 'action'»-advarsel, som SDK-en ville logget hvis hosten
+hadde svart uten `action` og fått `cancel` som default. Med andre ord: hosten kjenner
+`elicitation/create`, ser at det ikke finnes noe menneske å spørre i `-p`-modus, og avviser
+ryddig. `accept`-veien gjennom en ekte host krever en interaktiv økt, og er ikke klikket gjennom
+her — den er verifisert med Node-klienten i punkt 3 i stedet.
+
+#### Hva testene *ikke* dekker — ærlig
+
+De 10 nye testene i `BookingToolsTest` kjører alt på **vår side** av grensen: at valideringen skjer
+før noen spørres, at capability-sjekken virker (og at `elicit(...)` da aldri kalles), at alle tre
+handlingene og «accept uten avkryssing» gir riktig utfall, at ingenting lagres uten et ja, at
+meldingen inneholder datoene og totalprisen, at et blankt navn fra skjemaet stoppes av
+tjenestelaget, at kapasiteten sjekkes *etter* bekreftelsen, og at det genererte skjemaet er flatt
+med bare primitive felt.
+
+Det de **ikke** dekker:
+
+- **Selve JSON-RPC-runden.** `McpSyncRequestContext` er mocket, så testene beviser ingenting om at
+  `elicitation/create` faktisk kommer på tråden, hvordan den ser ut, eller at svaret
+  deserialiseres riktig. Det er dekket av punkt 3–5 over, utenfor testene.
+- **Tidsavbruddet** (punkt 4) og **hostens oppførsel** (punkt 5).
+- **Hvordan dialogen ser ut for et menneske.** Vi kontrollerer `message` og `requestedSchema`;
+  resten er hostens.
+
+> **Mockito er første gang i bruk i dette repoet.** Alternativet var en håndskrevet implementasjon
+> av `McpSyncRequestContext`, som har 28 metoder — 26 av dem irrelevante her. `ElicitationSpec` er
+> derimot håndskrevet (tre metoder), fordi testen skal kunne lese meldingen verktøyet bygger.
+
+#### To ting som ble valgt bort
+
+- **«Tillegg» i oppgaveteksten** («bekrefte datoer/tillegg»). Et ekte tillegg — frokost,
+  flyplasstransport — ville krevd et prisledd som ikke finnes i `PricingService`, altså **ny
+  forretningslogikk i verktøylaget**. Det bryter med den bærende beslutningen for hele løsningen
+  («verktøykode skal delegere»), og et tillegg som bare vises i teksten uten å påvirke prisen ville
+  vært en løgn til brukeren. Bekreftelsen gjelder derfor datoer, antall reisende og totalpris, og
+  dialogen henter i tillegg kundenavnet — som er den eneste opplysningen i domenet som *faktisk*
+  bare mennesket kan svare på.
+- **Å la brukeren endre datoene i dialogen.** Skjemaet kunne hatt `startDate`/`endDate` som
+  `string`, men da måtte verktøyet re-validere, regne prisen på nytt og potensielt spørre igjen —
+  en løkke, ikke et spørsmål. Datoene er derfor read-only i meldingen, og et `decline` betyr «nei,
+  spør meg om noe annet». Modellen får beskjed i `description` om å spørre hva som skal endres i
+  stedet for å prøve igjen med det samme.
+
+#### Opprydding
+
+- **Brukerens `vacation-booking`-registrering er urørt** (`✔ Connected` etterpå). Den midlertidige
+  `vb-t20` er fjernet med `claude mcp remove vb-t20 -s local`; ingenting ble skrevet til user- eller
+  project-scope.
+- **Ingen prosess igjen.** HTTP-serveren er stoppet, `pgrep` finner ingen, og
+  `lsof -nP -iTCP:8080 -sTCP:LISTEN` er tom.
+- **`vacation.db` er uendret** — SHA-256 `4f49ce48…` før og etter. Node-klienten kjørte serveren med
+  arbeidskatalog i scratchpad, så bookingene den opprettet havnet i en egen, kastbar database. Rå
+  stdio-røyktest og hjelpeskript lå også i scratchpad.
