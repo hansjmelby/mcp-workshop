@@ -11,7 +11,7 @@ etterpå. Én commit per oppgave.
 | Oppgave | Hva | Status | Leveranse |
 |---------|-----|--------|-----------|
 | T-00 | MCP-protokollen under panseret | 📝 | Verifisert trace + capability-analyse + svar ([se under](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner)) |
-| T-01 | Bygg, kjør og inspiser skallet | ⬜ | — |
+| T-01 | Bygg, kjør og inspiser skallet | 📝 | Grønn `clean build` + jar; `about_application` verifisert via stdio og Inspector-CLI; web-UI-et dokumentert ([se under](#t-01--bygg-kjør-og-inspiser-skallet)) |
 | T-02 | Koble serveren til Claude | ⬜ | — |
 | T-03 | `list_destinations` | ⬜ | — |
 | T-04 | `search_destinations` | ⬜ | — |
@@ -200,3 +200,133 @@ Det som *ikke* endrer seg: `"type":"object"`, `$schema`, capability-blokken fra
 Verifiseringssteget fra oppgaven («kjør `tools/list` på nytt etter T-03/T-04») krever at man
 kjører `./gradlew bootJar` først — jar-en er et øyeblikksbilde, og et nytt `@McpTool` dukker
 ikke opp i `tools/list` før den er bygget på nytt.
+
+### T-01 · Bygg, kjør og inspiser skallet
+
+Ingen kodeendring — dette er en verifikasjons-/verktøyoppgave. Web-UI-et i MCP Inspector er
+interaktivt og krever nettleser, så **UI-delen er dokumentert, ikke klikket gjennom**. Alt det
+UI-et ville vist er derimot verifisert programmatisk, både med rå stdio og med Inspector sin
+egen `--cli`-modus.
+
+#### 1. Bygget er grønt
+
+```
+$ ./gradlew clean build
+BUILD SUCCESSFUL in 2s
+9 actionable tasks: 9 executed
+```
+
+18 tester kjørte grønt (`DestinationServiceTest` 5, `PricingServiceTest` 6,
+`BookingServiceTest` 6, `VacationBookingMcpApplicationTests` 1) på Java 21 (`21.0.12`).
+Artefaktene ligger i `build/libs/`:
+
+| Fil | Størrelse | Hva |
+|-----|-----------|-----|
+| `vacation-booking-mcp-0.0.1-SNAPSHOT.jar` | ~35 MB | den kjørbare fat-jar-en fra `bootJar` — **denne** skal Inspector peke på |
+| `vacation-booking-mcp-0.0.1-SNAPSHOT-plain.jar` | ~27 kB | bare klassene fra `jar`-tasken; **ikke** kjørbar |
+
+#### 2. Det Inspector ville vist — verifisert med rå stdio
+
+Samme håndtrykk som i T-00, men med et `tools/call` på slutten:
+
+```bash
+{ … initialize … ; notifications/initialized ; tools/list ;
+  printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"about_application","arguments":{}}}'; }
+  | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar
+```
+
+Stdout ga nøyaktig tre linjer (initialize-svar, `tools/list`, `tools/call`):
+
+```jsonc
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"about_application","title":"about_application","description":"Forklarer hva denne applikasjonen er og hva den brukes til.","inputSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[]},"annotations":{…}}]}}
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"Dette er en ferie-booking MCP-server bygget i Spring Boot med Spring AI. …"}],"isError":false}}
+```
+
+Stderr inneholdt `RegisteredToolsLogger: Tilgjengelige MCP-tools (1): [about_application]` —
+den raskeste sanity-sjekken på at annotasjons-scanneren fant verktøyet.
+
+#### 3. Samme sjekk gjennom Inspector sin CLI-modus (ingen nettleser)
+
+Inspector v2 har en skriptbar `--cli`-modus. Den bruker samme klientkode som web-UI-et, så
+dette er en ekte Inspector-verifikasjon:
+
+```bash
+npx @modelcontextprotocol/inspector --cli \
+  java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar \
+  -- --method tools/list
+
+npx @modelcontextprotocol/inspector --cli \
+  java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar \
+  -- --method tools/call --tool-name about_application --format json
+```
+
+Begge svarte som forventet (`tools/list` ga `about_application` med tomt `inputSchema`,
+`tools/call` ga `"isError":false` og about-teksten). Serveren identifiserte klienten som
+`Implementation[name=inspector-cli, version=2.2.0]` i loggen.
+
+> **Argument-rekkefølgen i `--cli` er stiv:** serverkommandoen kommer **først**, deretter `--`,
+> og så Inspector-flaggene. Snur du på det (`--method … -- java -jar …`) svarer den
+> «Method is required». Merk også at `npx` spiser det første `--`-et hvis det kommer rett
+> etter pakkenavnet.
+
+#### 4. Kommandoen i BACKLOG/README er gyldig
+
+- `npm view @modelcontextprotocol/inspector version` → **2.2.0** (pakkenavnet finnes; bin-en
+  heter `mcp-inspector`).
+- Kommandoen fra BACKLOG ble startet kortvarig med auto-open avskrudd, og banneret kom opp:
+
+  ```
+  MCP Inspector Web is up and running at:
+     http://localhost:6274?MCP_INSPECTOR_API_TOKEN=d314994eb1…
+
+     Sandbox (MCP Apps): http://localhost:62345/sandbox
+
+     Auth token: d314994eb1…
+  ```
+
+  Den relative jar-stien ble altså akseptert som ad-hoc serverkommando. Prosessen ble
+  avsluttet igjen — UI-et selv er ikke gjennomgått.
+
+**To avvik mot v1 som README/BACKLOG-teksten er skrevet for** (ikke rettet her, siden T-01
+ikke skal endre workshop-tekstene — meldes videre):
+
+1. **Token-parameteren heter `MCP_INSPECTOR_API_TOKEN` i v2**, ikke `MCP_PROXY_AUTH_TOKEN`
+   (som fortsatt er riktig for `npx @modelcontextprotocol/inspector@v1-latest`). Poenget i
+   dokumentasjonen — «åpne akkurat den URL-en, ellers får du connection error» — står seg;
+   bare navnet på query-parameteren er nytt.
+2. **Fallback-oppskriften («Transport Type: STDIO / Command / Arguments»)** er v1-UI-et. I v2
+   legger du i stedet til en server via **Add Server**-flyten; feltene *Command* og
+   *Arguments* finnes fortsatt der.
+
+I tillegg krever Inspector v2 **Node ≥ 22.19.0** (verifisert her med Node 26.7.0). Deltakere
+med eldre Node må enten oppgradere eller kjøre `npx @modelcontextprotocol/inspector@v1-latest`.
+
+#### 5. Hva deltakeren skal se i Inspector
+
+1. Kjør `npx @modelcontextprotocol/inspector java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar`
+   **fra prosjektroten**. Terminalen skriver ut URL-en med auth-token.
+2. Åpne den tokeniserte URL-en og klikk **Connect**. Først *da* startes `java`-prosessen —
+   Inspector eier serverens livssyklus, du skal ikke starte jar-en selv i tillegg.
+3. Statusen slår om til **Connected**, og serveren presenterer seg som
+   `vacation-booking-mcp 0.0.1` med capabilities `tools`, `resources`, `prompts`, `logging`,
+   `completions` (se T-00 for hvorfor de tre siste er tomme i skallet).
+4. Under **Tools → List Tools** kommer det **ett** verktøy: `about_application`, med
+   beskrivelsen «Forklarer hva denne applikasjonen er og hva den brukes til.» Skjemaet er tomt
+   (ingen input-felt), så kall-knappen står alene.
+5. Klikk **Run Tool**. Svaret er et `content`-array med én tekstblokk som starter «Dette er en
+   ferie-booking MCP-server bygget i Spring Boot med Spring AI…», og `isError: false`.
+6. Panelet **Error output from MCP server** viser Spring-oppstartsloggen (banner, Hikari,
+   `RegisteredToolsLogger`). Det er **stderr, ikke feil** — det er nettopp dit
+   `logback-spring.xml` sender loggen for å holde stdout rent.
+
+#### 6. Vanlige fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| «Connection error» i nettleseren | Åpnet `http://localhost:6274` uten token-parameteren | Bruk *nøyaktig* URL-en fra terminalen — kopier hele linja, inkludert `?…TOKEN=…` |
+| «Connect» feiler med `Unable to access jarfile` | Inspector arver *sitt eget* arbeidskatalog, og den relative stien `build/libs/…` peker feil | Kjør `npx …` fra prosjektroten, eller bruk absolutt sti til jar-en |
+| Ingen jar å peke på | Bare `./gradlew test` er kjørt | `./gradlew build` (eller `bootJar`) — jar-en havner i `build/libs/` |
+| Serveren starter, men `tools/list` er tom | Pekt på `…-plain.jar` | Bruk fat-jar-en uten `-plain` |
+| Nytt verktøy dukker ikke opp | Jar-en er et øyeblikksbilde | Bygg på nytt (`./gradlew bootJar`) og **Reconnect** i Inspector |
+| Uforståelig JSON-parsefeil i Inspector | Noe har skrevet til `System.out` | All logging skal gå gjennom loggeren; stdout tilhører JSON-RPC |
+| `npx` finner ikke pakken / krasjer ved oppstart | For gammel Node | Inspector v2 krever Node ≥ 22.19.0 |
