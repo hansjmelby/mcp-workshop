@@ -23,7 +23,7 @@ etterpå. Én commit per oppgave.
 | T-10 | `list_bookings` | ✅ | `list_bookings` lagt til i `tools/BookingTools.java` (første **valgfrie enum** — `"enum":[…]` i skjemaet *og* tomt `required`; bar `List<Booking>` som svar, ingen konvolutt; krysshenvisning begge veier mot `get_booking`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-10--list_bookings)) |
 | T-11 | Avvis overbooking | ✅ | Verifikasjonsoppgave — ingen ny forretningslogikk. Kapasitetsregnestykket kartlagt og verifisert gjennom protokollen (fyll opp → én over → kansellering frigjør); `description` på `create_booking` utvidet med hva modellen skal gjøre med «N ledige plasser», og `check_availability` presisert (`capacity` er total, ikke ledig); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-11--avvis-overbooking)) |
 | T-12 | `cancel_booking` | ✅ | `cancel_booking` lagt til i `tools/BookingTools.java` — **funksjonelt identisk** med `update_booking_status(id, CANCELLED)` (`BookingService.cancel` *er* `updateStatus(id, CANCELLED)`); eget verktøy likevel, av hensyn til katalogen: ett argument i stedet for to, og en `destructiveHint = true`-oppføring hosten kan gate på ved navn. Kapasitetsfrigjøringen verifisert gjennom protokollen (fyll opp → avvist → `cancel_booking` → **samme** booking går gjennom); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-12--cancel_booking)) |
-| T-13 | Destinasjoner som Resource | ⬜ | — |
+| T-13 | Destinasjoner som Resource | ✅ | Ny pakke `resources/` → `resources/DestinationResources.java` med **to** `@McpResource`: den statiske `destination://catalog` (havner i `resources/list`) og malen `destination://{id}` (havner i `resources/templates/list`). Første primitiv som ikke er et verktøy: innholdet er **`text/markdown`**, ikke JSON, fordi det legges rått i konteksten; felles ressurs-beslutninger etablert for T-14; test `resources/DestinationResourcesTest.java` med 7 tester ([se under](#t-13--destinasjoner-som-resource)) |
 | T-14 | Bookinger som Resource | ⬜ | — |
 | T-15 | Prompts | ⬜ | — |
 | T-16 | `bookings_report` | ⬜ | — |
@@ -155,6 +155,40 @@ Spring AI legger **konstantnavnene inn i skjemaet** som en `enum`-liste, og — 
   hvilke overganger som er lov fra der bookingen står nå. Den regelen ligger i
   `BookingStatus.canTransitionTo(...)` og håndheves av `BookingService.updateStatus(...)` —
   kompenser i `description`, ikke med ny logikk i verktøyet.
+
+### Ressurser over MCP-grensen (avgjort i T-13 — følg denne)
+
+Gjelder T-13 ✅ og **T-14** (`booking://{id}`), som skal se lik ut. Alt er verifisert mot den
+ekte JSON-en; tracen ligger i [T-13-seksjonen](#t-13--destinasjoner-som-resource).
+
+- **Egen pakke `no.computas.vacationmcp.resources`**, klassenavn med suffikset `Resources`
+  (`DestinationResources` T-13 ✅, `BookingResources` T-14). Ressurser og verktøy blandes ikke i
+  samme klasse — de har ulik bruker (modellen vs. applikasjonen/mennesket), ulikt svarformat og
+  ulik feilkanal.
+- **Innholdet er lesbar tekst, `mimeType = "text/markdown"` — ikke JSON.** Dette er det motsatte
+  valget av T-03 (verktøy returnerer domene-records som JSON), og det er bevisst: et
+  verktøysvar er et mellomresultat modellen leser og plukker felt fra midt i en verktøykjede,
+  mens ressursinnholdet legges **rått inn i konteksten** av hosten, ofte før modellen har sagt
+  noe. Begrunnelsen i sin helhet står i T-13-seksjonen.
+- **`id` skal alltid stå i teksten** (`**Lofoten Rorbuer** (id 1)`), for det er broa fra ressurs
+  til verktøy: uten id-en kan ikke modellen gå videre til `get_quote`/`create_booking`.
+- **Returtypen må være `String`** (eller `List<String>`/`ResourceContents`/`ReadResourceResult`).
+  Spring AI serialiserer *ikke* en record for deg her, slik den gjør for `@McpTool` —
+  `SyncMcpResourceMethodCallback.validateReturnType` kaster ved oppstart hvis du prøver.
+  Formateringen er altså din, og hører hjemme i ressursklassen.
+- **URI-variabler kommer alltid som `String`**, og det finnes ikke noe `inputSchema` som kan
+  validere dem. Konverter og valider selv i metoden.
+- **Statisk ressurs vs. mal avgjøres utelukkende av URI-en.** Inneholder `uri` en `{variabel}`,
+  havner oppføringen i `resources/templates/list`; ellers i `resources/list`. Én
+  `@McpResource`-annotasjon, to helt ulike protokollister.
+- **Feil får boble, som i `tools/`-laget — men utfallet er et annet.** `resources/read` har ingen
+  `isError`-kanal: klienten får en ekte JSON-RPC-`error` (`-32602`) med meldingen vår i `data`.
+  Skriv derfor meldinger som hjelper *applikasjonen og mennesket*, ikke bare modellen. Å kaste
+  `McpError.RESOURCE_NOT_FOUND` selv for å få spesifikasjonens `-32002` **virker ikke** i Spring
+  AI 2.0.0 — se T-13 for hvorfor.
+- **`title` og `annotations` på `@McpResource` er dødt i Spring AI 2.0.0** — `SyncMcpResourceProvider`
+  leser bare `uri`, `name`, `description`, `mimeType` og `meta`. Verifisert: ingen av dem dukker
+  opp i `resources/list`. Legg det klienten skal vise i `name` og `description`.
 
 ---
 
@@ -1941,3 +1975,230 @@ gjennom, og den kansellerte raden ligger fortsatt i `list_bookings`); og at de t
 `CANCELLED` gir samme resultat. Testene fra T-09/T-11 som allerede kansellerer via
 `update_booking_status` er **ikke** duplisert — de nye bruker med vilje den nye inngangen. Samme
 opprydding som resten av klassen (`DELETE FROM bookings` i `@BeforeEach` + `@AfterEach`).
+
+### T-13 · Destinasjoner som Resource
+
+Første oppgave som ikke handler om verktøy. To nye filer, ingen endringer i eksisterende kode:
+
+| Fil | Hva |
+|-----|-----|
+| `src/main/java/no/computas/vacationmcp/resources/DestinationResources.java` | `@Component` med **to** `@McpResource`: `destination://catalog` og `destination://{id}` |
+| `src/test/java/no/computas/vacationmcp/resources/DestinationResourcesTest.java` | 7 tester (katalogens innhold, id-ene, prisformat, enkeltoppslag, ukjent id, ikke-numerisk id, statisk vs. mal) |
+
+Ny pakke `resources/` ved siden av `tools/`. Grunnen er ikke ryddighet for ryddighetens skyld —
+det er to forskjellige primitiver med to forskjellige brukere, og de har allerede ulikt
+svarformat og ulik feilkanal (begge deler under).
+
+#### Tools vs. resources — det du må ha med deg videre
+
+Samme data (reisemålene) er nå eksponert to ganger, med vilje. Forskjellen ligger i *hvem som
+bestemmer at innholdet skal inn i samtalen*:
+
+| | Verktøy (`@McpTool`) | Ressurs (`@McpResource`) |
+|---|---|---|
+| Hvem velger å bruke den? | **Modellen**, midt i sin egen resonnering | **Applikasjonen eller mennesket** — hosten lister dem opp som vedlegg/@-nevninger, brukeren peker |
+| Når havner innholdet i konteksten? | Etter et `tools/call`, som et svar modellen ba om | Før modellen har sagt noe — teksten legges rått inn |
+| Adressering | Navn + argumenter validert av `inputSchema` | En **URI** (og eventuelle URI-variabler). Ikke noe skjema |
+| Bivirkninger | Kan være skrivende (`create_booking`) | Alltid ren lesing — et `resources/read` skal ikke endre noe |
+| Protokollmetoder | `tools/list`, `tools/call` | `resources/list`, `resources/templates/list`, `resources/read` |
+| Feil | `result` med `isError: true` — *modellen* leser feilen og prøver på nytt | JSON-RPC `error` — *klientkoden* håndterer den |
+
+En nyttig tommelfingerregel: **verktøy er verb, ressurser er substantiv.** «Søk etter reisemål
+under 2000 kroner» er en handling modellen tar (verktøy). «Reisemålskatalogen» er et dokument
+brukeren kan legge ved (ressurs). Derfor er det helt greit at `list_destinations` og
+`destination://catalog` viser de samme radene — de brukes på hver sin måte.
+
+> Merk at MCP-spesifikasjonen ikke *forbyr* en modell å lese ressurser; en host kan gi modellen
+> tilgang til `resources/read`. Men designet skal ta utgangspunkt i at ressursen er
+> applikasjonsstyrt kontekst, ikke et verktøykall.
+
+#### Én annotasjon, to protokollister
+
+`@McpResource` brukes helt likt i begge metodene. Det eneste som avgjør hvor oppføringen havner,
+er om `uri` inneholder en `{variabel}` — se `SyncMcpResourceProvider`, som kjører den samme lista
+med metoder to ganger og filtrerer på `McpPredicates.isUriTemplate(uri)`:
+
+```jsonc
+// resources/list — statiske ressurser, en ferdig liste klienten kan vise fram
+{"jsonrpc":"2.0","id":2,"result":{"resources":[
+  {"uri":"destination://catalog","name":"destination_catalog","description":"Hele katalogen over feriereisemål …","mimeType":"text/markdown"}]}}
+
+// resources/templates/list — maler klienten selv må fylle inn
+{"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[
+  {"uriTemplate":"destination://{id}","name":"destination","description":"Ett enkelt reisemål slått opp på id …","mimeType":"text/markdown"}]}}
+```
+
+Legg merke til at feltet til og med *heter* noe annet: `uri` i den ene lista, `uriTemplate` i den
+andre. En klient kan bla i `resources`-lista og la brukeren klikke; en mal må den derimot fylle
+inn selv (eller be modellen om å gjøre det), og derfor er `description` på malen skrevet som en
+bruksanvisning med et konkret eksempel (`destination://3`).
+
+**Hva med `destination://catalog` — kunne den ikke også matchet malen `destination://{id}`?** Jo,
+men statiske ressurser vinner: `McpAsyncServer.resourcesReadRequestHandler` prøver
+`findResourceSpecification(uri)` *først*, og går bare videre til
+`findResourceTemplateSpecification(uri)` hvis ingen statisk ressurs matcher. Verifisert —
+`resources/read` på `destination://catalog` gir katalogen, ikke et forsøk på å slå opp et
+reisemål med id-en «catalog».
+
+**To attributter som ikke gjør noe i Spring AI 2.0.0:** `title()` og `annotations()` (`audience`,
+`priority`, `lastModified`) på `@McpResource` leses aldri av `SyncMcpResourceProvider` — den
+bygger `McpSchema.Resource` av `uri`, `name`, `description`, `mimeType` og `meta`. Satt og
+verifisert: ingen av dem dukket opp i `resources/list`. Det klienten skal vise fram, må derfor
+stå i `name`. (For `@McpTool` er `annotations` derimot ekte — se T-03/T-07.)
+
+#### Innholdet: lesbar markdown, ikke JSON
+
+`mimeType = "text/markdown"`, og metodene bygger teksten selv. Dette er **motsatt** av
+[T-03](#t-03--list_destinations), der verktøyene returnerer domene-recorden og lar Spring AI
+serialisere den til JSON. Avveiningen er en annen, og det er verdt å forstå hvorfor:
+
+1. **Innholdet havner rått i konteksten.** Et verktøysvar er et mellomresultat modellen selv ba
+   om og plukker felt fra; en ressurs blir liggende i prompten som lesestoff, ofte plassert der
+   av et menneske som også ser den i klienten. Da er `- **Lofoten Rorbuer** (id 1) — Norge, 1850
+   kr per natt. Tradisjonelle rorbuer …` bedre enn `{"id":1,"name":"Lofoten Rorbuer","country":…}`
+   — for både mennesket og modellen, og med færre tokens brukt på gjentatte feltnavn.
+2. **Det finnes ingen kontrakt å bryte.** Et verktøy har `inputSchema` (og eventuelt
+   `outputSchema`); en ressurs har bare `mimeType`, som er et *renderingshint*. Ingen klient
+   parser innholdet etter et skjema, så JSON kjøper deg ingen maskinlesbarhet noen faktisk bruker
+   her — bare mer syntaks.
+3. **Spring AI serialiserer ikke for deg likevel.** `SyncMcpResourceMethodCallback.validateReturnType`
+   godtar bare `String`, `List<String>`, `ResourceContents`, `List<ResourceContents>` og
+   `ReadResourceResult` — returnerer du en record, feiler serveren ved *oppstart*. Formateringen
+   er altså din uansett; spørsmålet er bare om du skriver JSON eller prosa for hånd.
+
+Det som *ikke* endres av valget: **`id` må stå i teksten.** Broa fra ressurs til verktøy er
+id-en, og uten den kan ikke modellen gå videre til `check_availability`/`get_quote`/`create_booking`.
+Derfor står den eksplisitt både i katalogen (`(id 1)`) og i enkeltoppslaget (`- **id:** 3 — bruk
+denne i …`). Det er samme argument som i T-03, bare med et annet uttrykk.
+
+Når ville `application/json` vært riktig? Hvis ressursen skal *konsumeres av kode* — en klient som
+tegner et kart av reisemålene, eller en pipeline som differ katalogen mellom kjøringer. Da er
+maskinlesbarhet poenget, og markdown blir tungvint. T-14 (bookinger) har samme profil som T-13 og
+skal derfor bruke markdown; det står i de felles beslutningene over.
+
+Den faktiske responsen på `resources/read`:
+
+```jsonc
+{"jsonrpc":"2.0","id":4,"result":{"contents":[{"uri":"destination://catalog","mimeType":"text/markdown","text":"# Reisemålskatalog\n\nKatalogen inneholder 5 reisemål (åpne for booking). Prisen er utgangspris per natt i norske kroner — for en konkret periode kan sesongpris gjelde, så bruk verktøyet `get_quote` før du oppgir en totalsum.\n\n- **Lofoten Rorbuer** (id 1) — Norge, 1850 kr per natt. Tradisjonelle rorbuer med utsikt over fjorden.\n- **Santorini Caldera** (id 2) — Hellas, 2400 kr per natt. Hvitkalkede suiter på kanten av vulkankrateret.\n- **Kyoto Machiya** (id 3) — Japan, 1600 kr per natt. Historisk bytownhouse nær tempeldistriktet.\n- **Toscana Agriturismo** (id 4) — Italia, 1400 kr per natt. Vingård og olivenlund i de toscanske åsene.\n- **Tromsø Nordlys-lodge** (id 5) — Norge, 2100 kr per natt. Lodge med glasstak for nordlysobservasjon.\n"}]}}
+
+{"jsonrpc":"2.0","id":5,"result":{"contents":[{"uri":"destination://3","mimeType":"text/markdown","text":"# Kyoto Machiya\n\n- **id:** 3 — bruk denne i `check_availability`, `get_quote` og `create_booking`.\n- **Land:** Japan\n- **Pris per natt:** 1600 kr (utgangspris; sesongpris kan gjelde for en konkret periode)\n- **Åpent for booking:** ja\n\nHistorisk bytownhouse nær tempeldistriktet.\n"}]}}
+```
+
+Svaret er et `contents`-**array** (en ressurs kan bestå av flere deler), og hver del ekkoer `uri`
+og `mimeType`. Merk at `uri` i svaret er den *forespurte* URI-en (`destination://3`), ikke malen.
+
+#### Ukjent id: her ligner det *ikke* på T-04
+
+Dette er den viktigste forskjellen å ha sett med egne øyne. Verktøyfeil er et **resultat**
+(`isError: true`) fordi modellen skal lese dem; ressursfeil er en **JSON-RPC-`error`** fordi det
+er applikasjonen som må håndtere dem. Faktiske svar:
+
+```jsonc
+// destination://999 — malen matcher, metoden vår kjører, NotFoundException bobler
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"Error invoking resource method: destination in no.computas.vacationmcp.resources.DestinationResources. /nCause: Fant ikke reisemål med id 999. Gyldige id-er står i destination://catalog.","data":"Fant ikke reisemål med id 999. Gyldige id-er står i destination://catalog."}}
+
+// destination://abc — «abc» når helt fram til metoden; vår egen parsing avviser den
+{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"Error invoking resource method: destination in no.computas.vacationmcp.resources.DestinationResources. /nCause: «abc» er ikke en gyldig reisemål-id. URI-malen er destination://{id} der {id} er et heltall, f.eks. destination://3.","data":"…"}}
+
+// booking://1 — ingen ressurs OG ingen mal matcher; her svarer SDK-en selv
+{"jsonrpc":"2.0","id":8,"error":{"code":-32002,"message":"Resource not found","data":{"uri":"booking://1"}}}
+```
+
+Tre observasjoner:
+
+1. **Ingen `isError`, ingen `content`.** `resources/read` har ikke den kanalen i det hele tatt.
+   En klient som behandler alt med `error` som «kallet feilet» får altså riktig oppførsel gratis,
+   men modellen ser ikke nødvendigvis feilen — det er hostens valg om den viderefører den.
+2. **`-32602` (`INVALID_PARAMS`) er Spring AI sin innpakning**, på samme måte som
+   «Error invoking method: …»-linja i [T-04](#t-04--search_destinations):
+   `SyncMcpResourceMethodCallback.apply` fanger alt som kommer ut av metoden og bygger
+   `McpError.builder(ErrorCodes.INVALID_PARAMS)` med rot-årsakens melding — både i `message`
+   (etter en `/nCause:` som er en skrivefeil i biblioteket, ikke hos oss) og i `data`.
+   Java-klassenavnet lekker, akkurat som metodenavnet gjorde i T-04. **Meldingen er derfor det
+   eneste vi styrer** — og siden den leses av et menneske eller en klient, peker den videre til
+   `destination://catalog` i stedet for bare å si «ikke funnet».
+3. **Spesifikasjonens egen kode for dette er `-32002`** (`RESOURCE_NOT_FOUND`), og SDK-en bruker
+   den selv når *ingen* ressurs eller mal matcher URI-en (`booking://1` over). Den samme koden
+   for en ukjent id ville vært riktigere.
+
+**Forsøket som ikke virker — verdt å kjenne til.** `SyncMcpResourceMethodCallback.apply` har en
+gren som ser lovende ut:
+
+```java
+catch (Exception e) {
+    if (e instanceof McpError mcpError && mcpError.getJsonRpcError() != null) {
+        throw mcpError;      // slipp klientens egen feil rett gjennom
+    }
+    throw McpError.builder(ErrorCodes.INVALID_PARAMS) …
+}
+```
+
+Fasiten prøvde derfor først å kaste `McpError.RESOURCE_NOT_FOUND.apply("destination://999")` fra
+metoden. **Det ble ikke `-32002`.** Grunnen er at metoden kalles med refleksjon
+(`this.method.invoke(...)`), så det som fanges er en `InvocationTargetException` — ikke vår
+`McpError`. `instanceof`-sjekken bommer, og vi endte i `INVALID_PARAMS`-grenen likevel, nå med en
+*dårligere* melding («Resource not found», uten id-en):
+
+```jsonc
+{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"Error invoking resource method: destination in … /nCause: Resource not found","data":"Resource not found"}}
+```
+
+Konklusjonen ble derfor å følge den etablerte konvensjonen — la exception-en boble, ingen
+`try/catch` for feilkodens skyld — og heller investere i meldingen. Vil du virkelig ha `-32002`,
+må du forbi annotasjonsmodellen og registrere en `SyncResourceSpecification`-bean med en lambda
+som handler; da kalles den uten refleksjon, og et kastet `McpError` når fram. Det er utenfor
+T-13.
+
+#### Verifisering i test
+
+**`./gradlew build` er grønt** — 97 tester (90 fra før + 7 nye i `DestinationResourcesTest`). MCP-
+serveren er avskrudd i test, så ressursene testes som de Spring-beanene de er: at katalogen har
+alle fem reisemålene med id, land, pris og beskrivelse; at prisen skrives «1850 kr» og ikke
+«1850.0» (`double` → tekst er vår jobb nå); at enkeltoppslaget på `"3"` gir alle feltene; at
+ukjent id gir `NotFoundException` med en melding som peker på katalogen; at `"abc"` gir
+`ValidationException`; og — via refleksjon på annotasjonene — at katalog-URI-en er uten
+`{variabel}` mens den andre har `{id}`, altså regelen som avgjør statisk vs. mal.
+
+Testen dekker ikke selve protokoll-laget; det gjør røyktesten over. Ingen skriving mot databasen,
+så ingen opprydding er nødvendig (i motsetning til booking-testene).
+
+#### Fallgruver
+
+| Symptom | Årsak | Fiks |
+|---------|-------|------|
+| Serveren feiler ved **oppstart** med «Method must return either ReadResourceResult, List\<ResourceContents\>, …» | Ressursmetoden returnerer en record/`List<Destination>` | Returner `String` (eller `ResourceContents`) — Spring AI serialiserer ikke for deg her |
+| «URI variable parameters must be of type String» | Parameteren er `long id` | URI-variabler er alltid `String`; konverter i metoden |
+| Ressursen dukker opp i feil liste | `uri` har (eller mangler) en `{variabel}` | `{}` ⇒ `resources/templates/list`, ellers `resources/list` |
+| `title` vises ikke i klienten | `@McpResource.title()` leses ikke i Spring AI 2.0.0 | Legg visningsnavnet i `name` |
+| `resources/list` er tom etter at du la til en `@McpResource` | Jar-en er et øyeblikksbilde | `./gradlew bootJar` og koble til på nytt (samme fallgruve som for verktøy) |
+| Klienten viser ingenting selv om `resources/read` svarer | Ressurser er ikke automatisk med i konteksten | Bruker/host må velge dem — det er hele poenget med primitiven |
+
+Oppstartsloggen (stderr) bekrefter registreringen ved siden av `RegisteredToolsLogger`, som bare
+teller verktøy:
+
+```
+McpServerAutoConfiguration : Registered tools: 10
+McpServerAutoConfiguration : Registered resources: 1
+McpServerAutoConfiguration : Registered resource templates: 1
+```
+
+#### Røyktesten
+
+Samme håndtrykk som i T-00, men med ressursmetodene i stedet for `tools/list` (hjelpeskriptet lå
+i en scratchpad-katalog utenfor repoet):
+
+```bash
+{ … initialize … ; notifications/initialized ;
+  {"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}} ;
+  {"jsonrpc":"2.0","id":3,"method":"resources/templates/list","params":{}} ;
+  {"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"destination://catalog"}} ;
+  {"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"destination://3"}} ;
+  {"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"destination://999"}} ;
+  {"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"destination://abc"}} ;
+  {"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"booking://1"}} ;
+} | java -jar build/libs/vacation-booking-mcp-0.0.1-SNAPSHOT.jar > stdout.jsonl 2> stderr.log
+```
+
+Capability-blokken fra `initialize` er **uendret** fra T-00 (`"resources":{"subscribe":false,
+"listChanged":true}`) — den lovet allerede at metodene fantes; det som endret seg er at listene
+ikke lenger er tomme. Nøyaktig det poenget T-00 gjorde av capability-tabellen sin.
