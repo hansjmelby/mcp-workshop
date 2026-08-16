@@ -19,7 +19,7 @@ etterpå. Én commit per oppgave.
 | T-06 | `get_quote` | ✅ | `tools/PricingTools.java` → verktøyet `get_quote` (fire obligatoriske parametere — første ikke-tomme `required`; `Quote` returneres uendret); test `tools/PricingToolsTest.java` med 13 tester ([se under](#t-06--get_quote)) |
 | T-07 | `create_booking` | ✅ | `tools/BookingTools.java` → verktøyet `create_booking` (første **skrivende** verktøy — egne `annotations`; fem obligatoriske parametere; `Booking` returneres uendret); test `tools/BookingToolsTest.java` med 10 tester ([se under](#t-07--create_booking)) |
 | T-08 | `get_booking` | ✅ | `get_booking` lagt til i `tools/BookingTools.java` (første **lesende** verktøy i en blandet klasse — egne hint per metode; én obligatorisk `long id`; `Booking` returneres uendret); 4 nye tester i `tools/BookingToolsTest.java` ([se under](#t-08--get_booking)) |
-| T-09 | `update_booking_status` | ⬜ | — |
+| T-09 | `update_booking_status` | ✅ | `update_booking_status` lagt til i `tools/BookingTools.java` (første **enum** over MCP-grensen — `BookingStatus` gir `"enum":[…]` i skjemaet, og ugyldige verdier stoppes av skjemavalideringen; første verktøy med `destructiveHint = true` + `idempotentHint = true`); 7 nye tester i `tools/BookingToolsTest.java` ([se under](#t-09--update_booking_status)) |
 | T-10 | `list_bookings` | ⬜ | — |
 | T-11 | Avvis overbooking | ⬜ | — |
 | T-12 | `cancel_booking` | ⬜ | — |
@@ -62,7 +62,7 @@ etterpå. Én commit per oppgave.
   (`AbstractMcpToolMethodCallback.convertValueToCallToolResult`). Begrunnelse i T-03-seksjonen.
 - **`annotations`-hintene settes bevisst.** Lesende verktøy:
   `readOnlyHint = true, destructiveHint = false, idempotentHint = true, openWorldHint = false`.
-  Skrivende verktøy (T-07 ✅, T-09, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
+  Skrivende verktøy (T-07 ✅, T-09 ✅, T-12) skal *ikke* arve dette — sett `readOnlyHint = false` og
   vurder `destructiveHint`/`idempotentHint` selv; se
   [T-07-seksjonen](#t-07--create_booking) for den første faktiske hint-blokken og
   begrunnelsen hint for hint. Merk at `destructiveHint` og `idempotentHint` bare er
@@ -119,6 +119,35 @@ Konsekvensene å kjenne til:
   `AvailabilityRepository` er rent dataaksess, så verktøyet validerer selv, med
   `ValidationException` og **ordrett samme meldinger** som `PricingService`
   (`"fra-dato må være før til-dato"`, `"fra- og til-dato må oppgis"`).
+
+### Enum-er over MCP-grensen (avgjort i T-09 — følg denne)
+
+**Bruk enum-typen (`BookingStatus`) som parametertype, ikke `String`.** Gjelder T-09 ✅ og
+videre T-10 (`list_bookings(status?)`), som tar samme enum.
+
+Verifisert empirisk mot den ekte JSON-en (se [T-09-seksjonen](#t-09--update_booking_status)):
+Spring AI legger **konstantnavnene inn i skjemaet** som en `enum`-liste, og — til forskjell fra
+`format: "date"` — er dette en begrensning JSON Schema faktisk håndhever:
+
+```jsonc
+"status": {"type":"string","enum":["PENDING","CONFIRMED","PAID","COMPLETED","CANCELLED"],"description":"…"}
+```
+
+- **Modellen får de gyldige verdiene maskinlesbart.** Med `String` hadde skjemaet vært et bart
+  `{"type":"string"}`, og verdilista måtte stått i prosa i `description` — samme tap som
+  `String`-datoer ville gitt i T-05, bare tydeligere.
+- **Ugyldige verdier stoppes av skjemavalideringen, før metoden.** `"BANANA"` — og `"confirmed"`
+  med små bokstaver, for lista er case-sensitiv — gir
+  `input validation failed: … [/status: har ikke en verdi i oppregningen ["PENDING", …]]`.
+  Dette er *tidligere* enn datoene stoppes: `format: "date"` er bare en annotasjon, så
+  «01.07.2026» slipper forbi validatoren og stoppes av Jackson. En ugyldig enum-verdi når aldri
+  deserialiseringen.
+- **Feilmeldingen ramser opp de lovlige verdiene**, så en modell som bommer kan rette seg selv
+  uten et nytt `tools/list`.
+- **Skjemaet kan ikke uttrykke tilstandsmaskinen.** `enum` sier hvilke verdier som finnes, ikke
+  hvilke overganger som er lov fra der bookingen står nå. Den regelen ligger i
+  `BookingStatus.canTransitionTo(...)` og håndheves av `BookingService.updateStatus(...)` —
+  kompenser i `description`, ikke med ny logikk i verktøyet.
 
 ---
 
@@ -1270,3 +1299,176 @@ kommer tilbake — inkludert `startDate`/`endDate` som `"2026-10-05"`-strenger g
 > **Røyktesten skriver til `vacation.db` i prosjektroten**, akkurat som i T-07. Fila ble kopiert
 > før kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen).
 > Hjelpeskriptet lå i en scratchpad-katalog utenfor repoet.
+
+### T-09 · `update_booking_status`
+
+Tredje verktøy i `BookingTools`, og det første der et **enum** krysser MCP-grensen. Ingen nye
+filer:
+
+| Fil | Endring |
+|-----|---------|
+| `src/main/java/no/computas/vacationmcp/tools/BookingTools.java` | nytt `@McpTool(name = "update_booking_status")` → `BookingService.updateStatus(id, target)`; `get_booking` fikk krysshenvisning til det nye verktøyet |
+| `src/test/java/no/computas/vacationmcp/tools/BookingToolsTest.java` | 7 nye tester (lovlig overgang, hele kjeden, hoppet steg, terminal status, gjentatt kall, kansellering fra alle tre ikke-terminale statuser, ukjent id) |
+
+Metodekroppen er igjen **én linje**: `return bookings.updateStatus(id, status);`. Tjenesten slår
+opp bookingen, spør `BookingStatus.canTransitionTo(...)` og kaster `ValidationException` ved en
+ulovlig overgang — verktøyet kjenner ingen regler selv og gjør ingen forhåndssjekk.
+
+#### Enum-et: `BookingStatus`, ikke `String` — og skjemaet avgjorde det
+
+Dette er kjernen i oppgaven, og svaret er utvetydig. Den faktiske `inputSchema`-en fra
+`tools/list` mot den nybygde jar-en:
+
+```jsonc
+"inputSchema": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "integer",
+      "format": "int64",
+      "description": "Id-en til bookingen som skal endres, slik den kom fra `create_booking` eller `get_booking`. En ukjent id gir en feilmelding, og ingenting endres — ikke gjett."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PENDING", "CONFIRMED", "PAID", "COMPLETED", "CANCELLED"],
+      "description": "Statusen bookingen skal flyttes til. Må være én av de fem verdiene i skjemaet, skrevet med store bokstaver. Overgangen må være lovlig fra statusen bookingen står i nå: …"
+    }
+  },
+  "required": ["id", "status"]
+}
+```
+
+**Enum-verdiene kommer med.** Spring AI reflekterer over Java-typen og legger konstantnavnene inn
+som en `enum`-liste, i deklarasjonsrekkefølgen fra `BookingStatus` (som tilfeldigvis også er
+rekkefølgen i livssyklusen). Modellen får dermed hele verdimengden maskinlesbart, uten at vi har
+skrevet den noe sted. Det er nøyaktig det [T-00 gjettet](#t-00--se-mcp-protokollen-før-du-bruker-spring-annotasjoner)
+(«enum → `"enum":[…]`»), og det avgjorde valget: med `String` hadde skjemaet vært et bart
+`{"type":"string"}`, og de fem verdiene måtte stått som prosa i `description` — der de ville
+råtnet stille hvis noen la til en status i enum-et. Nå kan de ikke komme ut av synk.
+
+#### Hvor «BANANA» stoppes — sammenlignet med `format: "date"` fra T-05
+
+Fire sonderinger gjennom protokollen:
+
+| Argument for `status` | Svar | Hvem stoppet det |
+|-----------------------|------|------------------|
+| `"CONFIRMED"` (lovlig overgang) | `isError:false`, oppdatert booking | — (gyldig) |
+| `"BANANA"` | `isError:true`: `Tool (update_booking_status) input validation failed: … [/status: har ikke en verdi i oppregningen ["PENDING", "CONFIRMED", "PAID", "COMPLETED", "CANCELLED"]]` | **skjemavalideringen**, før metoden |
+| `"confirmed"` (små bokstaver) | samme melding som over | **skjemavalideringen** — `enum` er case-sensitiv |
+| utelatt | `isError:true`: `… [: påkrevd egenskap 'status' ikke funnet]` | **skjemavalideringen** (`required`) |
+
+**Kontrasten til T-05 er poenget.** `format: "date"` er i JSON Schema bare en *annotasjon*, så
+«01.07.2026» slipper forbi validatoren og stoppes først av Jackson, med en melding som lekker
+`java.time.LocalDate`. `enum` er derimot en ekte *begrensning*: den håndheves av serverens
+skjemavalidering, akkurat som `type` og `required`, og en ugyldig verdi når aldri
+deserialiseringen — langt mindre metoden. Meldingen er dessuten bedre enn den vi ville skrevet
+selv: den ramser opp de lovlige verdiene, så modellen kan rette seg uten et nytt `tools/list`.
+Enum-et er altså det sterkeste av de tre nivåene vi har sett så langt: `String` (ingenting),
+`format` (hint til modellen), `enum` (håndhevet kontrakt).
+
+Det skjemaet **ikke** kan uttrykke, er tilstandsmaskinen. `enum` sier hvilke verdier som finnes,
+ikke hvilke overganger som er lov fra der bookingen står *nå* — det avhenger av databasens
+tilstand og hører hjemme i `BookingStatus.canTransitionTo(...)`.
+
+#### Meldingen ved ulovlig overgang — og hva `description` måtte kompensere for
+
+```jsonc
+{"content":[{"type":"text","text":"Error invoking method: updateBookingStatus\nUlovlig statusovergang: COMPLETED -> PENDING"}],"isError":true}
+```
+
+Mønsteret fra T-04 uendret: `result` med `isError: true`, ingen stacktrace, Spring AI sin
+innpakningslinje + tjenestens egen melding. Meldingen er lesbar og navngir **begge** statusene, så
+modellen ser hva den forsøkte og hvor bookingen faktisk står. Men den sier ikke hva som *er*
+lovlig — «`COMPLETED -> PENDING` er ulovlig» hjelper ikke en modell til å gjette at `PAID` er det
+eneste steget videre fra `CONFIRMED`. Å legge de lovlige overgangene inn i feilmeldingen ville
+krevd ny logikk i verktøylaget (eller i `BookingService`, som er gitt kode), så kompensasjonen
+ligger der den hører hjemme: i `description`, som ramser opp hele tilstandsmaskinen som en liste
+og sier eksplisitt at `COMPLETED`/`CANCELLED` er endestasjoner, at kjeden bare går framover ett
+steg om gangen, og at et gjentatt kall med samme verdi avvises.
+
+#### `annotations`: `destructiveHint = true`, `idempotentHint = true` — begge motsatt av T-07
+
+```jsonc
+// create_booking (T-07)                        // update_booking_status (T-09)
+"annotations": {                                // "annotations": {
+  "title": "Opprett booking",                   //   "title": "Endre bookingstatus",
+  "readOnlyHint": false,                        //   "readOnlyHint": false,
+  "destructiveHint": false,                     //   "destructiveHint": true,
+  "idempotentHint": false,                      //   "idempotentHint": true,
+  "openWorldHint": false                        //   "openWorldHint": false
+}                                               // }
+```
+
+To skrivende verktøy i samme klasse, og likevel motsatt svar på to av fire hint — samme lærdom
+som i T-08, bare skarpere: hintene beskriver *hva metoden gjør*, ikke hvilken bøtte den ligger i.
+
+- **`readOnlyHint = false`** — et `UPDATE` mot `bookings`. Samme som T-07: hosten skal behandle
+  kallet som en handling, ikke som et oppslag.
+- **`destructiveHint = true`** — her skiller det seg fra `create_booking`. Spesifikasjonen spør om
+  oppdateringen er *additiv* eller *destruktiv*. T-07 gjør et `INSERT`: en ny rad, ingenting går
+  tapt. Dette verktøyet **overskriver** `status` på en rad som allerede finnes — den forrige
+  verdien er borte etterpå — og tilstandsmaskinen er enveiskjørt, så `COMPLETED` og `CANCELLED`
+  ikke kan angres. `CANCELLED` avlyser i tillegg en reell booking og frigjør plassene til andre.
+  Alle tre pekene sier destruktiv.
+- **`idempotentHint = true`** — også motsatt av T-07, og det som gjør oppgaven verdt å tenke
+  gjennom. Hintet handler om **effekten** av gjentatte kall, ikke om svaret: kaller du
+  `{"id":1,"status":"CONFIRMED"}` to ganger, flytter det første bookingen, mens det andre avvises
+  med `Ulovlig statusovergang: CONFIRMED -> CONFIRMED` (en overgang til seg selv er ikke en kant i
+  maskinen). Databasen er identisk etter kall to som etter kall ett — ingen ytterligere effekt,
+  altså idempotent. Kontrasten til `create_booking`, der kall to gir en *ny* booking med ny id, er
+  hele forskjellen. Praktisk konsekvens for hosten: et retry etter timeout kan ikke dobbelt-flytte
+  en booking fra `PENDING` til `PAID`. Konsekvensen for modellen står i `description`: et retry som
+  svarer «Ulovlig statusovergang: X -> X» betyr som regel at det *første* kallet gikk gjennom —
+  bekreft med `get_booking` framfor å konkludere med at endringen feilet.
+- **`openWorldHint = false`** — fortsatt bare vår egen SQLite-base.
+
+#### Verifisering
+
+**1. `./gradlew build` er grønt** — 69 tester (62 fra før + 7 nye). De nye dekker: lovlig overgang
+`PENDING → CONFIRMED` der endringen også sjekkes lagret og resten av raden verifiseres uendret;
+hele kjeden `PENDING → CONFIRMED → PAID → COMPLETED`; et hoppet steg (`PENDING → PAID`) med
+**ordrett** melding og kontroll på at statusen står urørt etterpå; begge ulovlige overgangene ut
+av `COMPLETED` (`PENDING` og `CANCELLED`); et gjentatt identisk kall (`idempotentHint = true` i
+praksis: avvist, men bookingen er bit for bit den samme); kansellering fra alle tre ikke-terminale
+statusene pluss at `CANCELLED` ikke kan gjenopplives; og ukjent id (999). Testene bruker
+ikke-overlappende datovinduer innenfor Kyoto-perioden, slik at kapasiteten på 3 ikke blander seg
+inn — kapasitet er T-11 sitt tema. Samme opprydding som resten av klassen (`DELETE FROM bookings`
+i `@BeforeEach` + `@AfterEach`).
+
+**2. Gjennom protokollen** — håndtrykk som i T-00, deretter `tools/list` og ni `tools/call` mot den
+nybygde jar-en. Stderr bekreftet registreringen:
+`Tilgjengelige MCP-tools (8): [about_application, check_availability, create_booking, get_booking, update_booking_status, list_destinations, search_destinations, get_quote]`.
+
+| Kall | Resultat |
+|------|----------|
+| `create_booking` `{"customerName":"Ola Nordmann","destinationId":3,"from":"2026-10-05","to":"2026-10-08","numTravelers":2}` | `isError:false`, `id: 1`, `status: PENDING` |
+| `{"id":1,"status":"CONFIRMED"}` | `isError:false`, hele bookingen tilbake med `"status":"CONFIRMED"` |
+| `{"id":1,"status":"CONFIRMED"}` (igjen) | `isError:true`: `Ulovlig statusovergang: CONFIRMED -> CONFIRMED` |
+| `{"id":1,"status":"PENDING"}` | `isError:true`: `Ulovlig statusovergang: CONFIRMED -> PENDING` (ingen vei bakover) |
+| `{"id":1,"status":"BANANA"}` | `isError:true`: **skjemavalideringen**, se tabellen over |
+| `{"id":1,"status":"PAID"}` → `{"id":1,"status":"COMPLETED"}` | begge `isError:false` — kjeden fullført |
+| `{"id":1,"status":"CANCELLED"}` | `isError:true`: `Ulovlig statusovergang: COMPLETED -> CANCELLED` |
+| `{"id":999,"status":"CONFIRMED"}` | `isError:true`: `Fant ingen booking med id 999` |
+
+Den oppdaterte bookingen, ordrett fra tekstblokken etter `CONFIRMED`:
+
+```json
+{"id":1,"customerName":"Ola Nordmann","destinationId":3,"startDate":"2026-10-05","endDate":"2026-10-08","numTravelers":2,"totalPrice":9600.0,"status":"CONFIRMED"}
+```
+
+Bare `status` er endret — resten er byte for byte det `create_booking` returnerte. `Booking`
+returneres uendret etter T-03-konvensjonen; recorden bærer allerede den nye statusen, så det
+finnes ingen kvittering å konstruere.
+
+> **Røyktesten skriver til `vacation.db` i prosjektroten**, som i T-07/T-08. Fila ble kopiert før
+> kjøringen og lagt tilbake etterpå (`select count(*) from bookings` er 0 igjen). Hjelpeskriptene
+> lå i en scratchpad-katalog utenfor repoet.
+
+#### Krysshenvisningen
+
+`get_booking` sier nå eksplisitt at den *ikke* flytter status, og peker på
+`update_booking_status` — samme begge-veier-mønster som T-03/T-04. Beskrivelsen av det nye
+verktøyet peker motsatt vei: slå opp bookingen med `get_booking` først for å se hvilken status den
+faktisk står i, og bruk den samme etter et tvilsomt retry. `list_bookings` (T-10) er med vilje
+ikke nevnt ennå — den finnes ikke i `tools/list` før den oppgaven lander.

@@ -191,8 +191,9 @@ public class BookingTools {
                     `list_destinations` hvis brukeren skal se hva reisemålet heter.
 
                     Verktøyet **endrer ingenting** og kan trygt kalles på nytt; det oppretter \
-                    heller ingen booking. Bruk `create_booking` for å opprette en, og ta vare \
-                    på `id`-en du får tilbake derfra — den er det eneste denne oppslaget \
+                    heller ingen booking, og det flytter ingen status — bruk \
+                    `update_booking_status` til det. Bruk `create_booking` for å opprette en, og \
+                    ta vare på `id`-en du får tilbake derfra — den er det eneste denne oppslaget \
                     godtar. Finnes ikke id-en, får du feilmeldingen «Fant ingen booking med id \
                     N»; da har du sannsynligvis gjettet på et nummer. Spør brukeren om \
                     referansen i stedet for å prøve deg fram med flere id-er.""",
@@ -215,5 +216,109 @@ public class BookingTools {
         // Ingen try/catch: NotFoundException fra tjenesten får boble ut og blir et
         // CallToolResult med isError: true og meldingen som tekst (mønsteret fra T-04).
         return bookings.get(id);
+    }
+
+    /**
+     * Flytter en booking til en ny status ved å delegere til
+     * {@link BookingService#updateStatus(long, BookingStatus)}. Tilstandsmaskinen ligger i
+     * {@link BookingStatus#canTransitionTo(BookingStatus)} — verktøyet kjenner ingen regler selv
+     * og gjør ingen sjekk før kallet.
+     *
+     * <p><b>Enum-et krysser MCP-grensen som en enum.</b> Parameteren er {@link BookingStatus},
+     * ikke {@code String}, og det er hele poenget med T-09: Spring AI utleder
+     * {@code {"type":"string","enum":["PENDING","CONFIRMED","PAID","COMPLETED","CANCELLED"]}} i
+     * {@code inputSchema}, så modellen får de gyldige verdiene maskinlesbart — og en ukjent verdi
+     * («BANANA») stoppes av <em>skjemavalideringen</em>, før metoden kalles. Det er en sterkere
+     * kontrakt enn {@code format: "date"} fra T-05, som bare er en annotasjon validatoren ser bort
+     * fra. Med {@code String} hadde vi fått et bart {@code {"type":"string"}} og måtte skrevet
+     * verdiene i prosa. Se T-09-seksjonen i {@code SOLUTION-STATUS.md} for den faktiske JSON-en.
+     *
+     * <p><b>Hintene — sammenlign med {@code create_booking}, som svarer motsatt på to av dem:</b>
+     *
+     * <ul>
+     *   <li>{@code readOnlyHint = false} — verktøyet gjør et {@code UPDATE} mot {@code bookings}.
+     *       Samme sak som for {@code create_booking}: hosten skal behandle kallet som en handling,
+     *       ikke som et oppslag.
+     *   <li>{@code destructiveHint = true} — <em>her</em> skiller det seg fra
+     *       {@code create_booking}. Det verktøyet gjør et {@code INSERT}: rent additivt, ingenting
+     *       går tapt. Dette verktøyet <em>overskriver</em> {@code status}-feltet på en rad som
+     *       allerede finnes; den forrige statusen er borte etterpå, og tilstandsmaskinen er
+     *       enveiskjørt — {@code COMPLETED} og {@code CANCELLED} er terminale, så det finnes ingen
+     *       vei tilbake. {@code CANCELLED} avlyser i tillegg en reell booking og frigjør plassene
+     *       til andre. Spesifikasjonen spør nettopp om oppdateringen er additiv eller destruktiv,
+     *       og svaret her er destruktiv.
+     *   <li>{@code idempotentHint = true} — også motsatt av {@code create_booking}. Hintet handler
+     *       om <em>effekten</em> av gjentatte kall, ikke om svaret: to like kall etter hverandre
+     *       gir ikke to statusendringer. Det første flytter bookingen, det andre avvises av
+     *       tilstandsmaskinen (en overgang til seg selv er ikke lov), og databasen er den samme
+     *       etter kall to som etter kall ett. Et retry etter timeout kan altså ikke «dobbelt-flytte»
+     *       en booking fra {@code PENDING} til {@code PAID}. Merk konsekvensen for modellen: et
+     *       retry som svarer «Ulovlig statusovergang: CONFIRMED -&gt; CONFIRMED» betyr som regel at
+     *       det <em>første</em> kallet gikk gjennom — bekreft med {@code get_booking} i stedet for
+     *       å konkludere med at endringen feilet.
+     *   <li>{@code openWorldHint = false} — fortsatt bare vår egen SQLite-base.
+     * </ul>
+     */
+    @McpTool(
+            name = "update_booking_status",
+            title = "Endre bookingstatus",
+            description =
+                    """
+                    Flytter en eksisterende booking til en ny status i livssyklusen. Verktøyet \
+                    **endrer** databasen og overskriver den statusen bookingen har nå — bekreft \
+                    med brukeren før du kaller det, og slå gjerne opp bookingen med \
+                    `get_booking` først for å se hvilken status den faktisk står i.
+
+                    Lovlige overganger (alt annet avvises):
+
+                    - `PENDING` → `CONFIRMED` eller `CANCELLED`
+                    - `CONFIRMED` → `PAID` eller `CANCELLED`
+                    - `PAID` → `COMPLETED` eller `CANCELLED`
+                    - `COMPLETED` og `CANCELLED` er **endestasjoner** — derfra går det ingen vei \
+                    videre, heller ikke tilbake
+
+                    Kjeden går altså bare framover, ett steg om gangen: skal en `PENDING`-booking \
+                    bli `PAID`, må du først sette den til `CONFIRMED`. Det finnes ingen overgang \
+                    fra en status til seg selv, så et gjentatt kall med samme verdi avvises — det \
+                    betyr som regel at det forrige kallet gikk gjennom, ikke at noe er galt. \
+                    Sjekk med `get_booking` framfor å prøve på nytt.
+
+                    Svaret er hele den oppdaterte bookingen, med `status` satt til den nye \
+                    verdien og resten av feltene uendret. Ulovlige overganger avvises med \
+                    «Ulovlig statusovergang: FRA -> TIL», og en ukjent id med «Fant ingen booking \
+                    med id N». Ingen av delene endrer noe i databasen.""",
+            annotations =
+                    @McpTool.McpAnnotations(
+                            title = "Endre bookingstatus",
+                            readOnlyHint = false,
+                            destructiveHint = true,
+                            idempotentHint = true,
+                            openWorldHint = false))
+    public Booking updateBookingStatus(
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Id-en til bookingen som skal endres, slik den kom fra \
+                                    `create_booking` eller `get_booking`. En ukjent id gir en \
+                                    feilmelding, og ingenting endres — ikke gjett.""")
+                    long id,
+            @McpToolParam(
+                            required = true,
+                            description =
+                                    """
+                                    Statusen bookingen skal flyttes til. Må være én av de fem \
+                                    verdiene i skjemaet, skrevet med store bokstaver. Overgangen \
+                                    må være lovlig fra statusen bookingen står i nå: `CONFIRMED` \
+                                    bekrefter en `PENDING`-booking, `PAID` markerer en \
+                                    `CONFIRMED`-booking som betalt, `COMPLETED` avslutter et \
+                                    gjennomført opphold som er betalt, og `CANCELLED` avlyser en \
+                                    booking som ennå ikke er `COMPLETED` (og frigjør plassene). \
+                                    Hopp aldri over et steg — sett heller status to ganger.""")
+                    BookingStatus status) {
+        // Ingen sjekk av tilstandsmaskinen her: BookingService.updateStatus spør
+        // BookingStatus.canTransitionTo(...) og kaster ValidationException ved en ulovlig
+        // overgang (NotFoundException ved ukjent id). Begge får boble ut (T-04).
+        return bookings.updateStatus(id, status);
     }
 }

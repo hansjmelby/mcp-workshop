@@ -245,4 +245,158 @@ class BookingToolsTest {
                 "Fant ingen booking med id " + id,
                 assertThrows(NotFoundException.class, () -> tools.getBooking(id)).getMessage());
     }
+
+    // --- T-09 · update_booking_status ---------------------------------------------------
+
+    /**
+     * Oppretter en booking i et eget datovindu innenfor Kyoto-perioden (2026-10-01→11-30).
+     * Statustestene under trenger flere bookinger samtidig, og med ikke-overlappende vinduer
+     * slipper de å konkurrere om kapasiteten på 3 — kapasitet er T-11 sitt tema, ikke T-09 sitt.
+     */
+    private Booking bookingStartingOn(int dayOfOctober) {
+        return tools.createBooking(
+                "Ola Nordmann",
+                KYOTO,
+                LocalDate.of(2026, 10, dayOfOctober),
+                LocalDate.of(2026, 10, dayOfOctober + 3),
+                1);
+    }
+
+    @Test
+    void movesAPendingBookingToConfirmed() {
+        Booking opprettet = bookingStartingOn(5);
+
+        Booking oppdatert = tools.updateBookingStatus(opprettet.id(), BookingStatus.CONFIRMED);
+
+        assertEquals(BookingStatus.CONFIRMED, oppdatert.status());
+        // Endringen er lagret, ikke bare returnert.
+        assertEquals(BookingStatus.CONFIRMED, tools.getBooking(opprettet.id()).status());
+        // …og bare status er rørt: resten av raden er den samme.
+        assertEquals(
+                new Booking(
+                        opprettet.id(),
+                        opprettet.customerName(),
+                        opprettet.destinationId(),
+                        opprettet.startDate(),
+                        opprettet.endDate(),
+                        opprettet.numTravelers(),
+                        opprettet.totalPrice(),
+                        BookingStatus.CONFIRMED),
+                oppdatert);
+    }
+
+    /** Hele den lovlige kjeden, ett steg om gangen — akseptkriteriet i T-09. */
+    @Test
+    void walksTheWholeLegalChainOneStepAtATime() {
+        long id = bookingStartingOn(5).id();
+
+        assertEquals(
+                BookingStatus.CONFIRMED,
+                tools.updateBookingStatus(id, BookingStatus.CONFIRMED).status());
+        assertEquals(
+                BookingStatus.PAID, tools.updateBookingStatus(id, BookingStatus.PAID).status());
+        assertEquals(
+                BookingStatus.COMPLETED,
+                tools.updateBookingStatus(id, BookingStatus.COMPLETED).status());
+        assertEquals(BookingStatus.COMPLETED, tools.getBooking(id).status());
+    }
+
+    /** Steg kan ikke hoppes over: {@code PENDING → PAID} er ikke en kant i tilstandsmaskinen. */
+    @Test
+    void rejectsSkippingAStepInTheChain() {
+        long id = bookingStartingOn(5).id();
+
+        assertEquals(
+                "Ulovlig statusovergang: PENDING -> PAID",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.updateBookingStatus(id, BookingStatus.PAID))
+                        .getMessage());
+        assertEquals(BookingStatus.PENDING, tools.getBooking(id).status(), "ingenting skal endres");
+    }
+
+    /**
+     * Eksempelet fra akseptkriteriet: {@code COMPLETED} er en endestasjon, så det går verken
+     * bakover eller videre derfra. Meldingen er ordrett den klienten får (etter innpakningslinja
+     * fra Spring AI, se T-04).
+     */
+    @Test
+    void rejectsAnIllegalTransitionOutOfATerminalStatus() {
+        long id = bookingStartingOn(5).id();
+        tools.updateBookingStatus(id, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(id, BookingStatus.PAID);
+        tools.updateBookingStatus(id, BookingStatus.COMPLETED);
+
+        assertEquals(
+                "Ulovlig statusovergang: COMPLETED -> PENDING",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.updateBookingStatus(id, BookingStatus.PENDING))
+                        .getMessage());
+        assertEquals(
+                "Ulovlig statusovergang: COMPLETED -> CANCELLED",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.updateBookingStatus(id, BookingStatus.CANCELLED))
+                        .getMessage());
+        assertEquals(BookingStatus.COMPLETED, tools.getBooking(id).status());
+    }
+
+    /**
+     * {@code idempotentHint = true} i praksis. Hintet lover at gjentatte kall ikke gir
+     * <em>ytterligere effekt</em> — ikke at kall nummer to svarer det samme. Her avvises det
+     * andre kallet (en overgang til seg selv er ikke lov), men databasen er identisk etterpå,
+     * og det er nettopp det hintet handler om.
+     */
+    @Test
+    void repeatingTheSameUpdateChangesNothingFurther() {
+        long id = bookingStartingOn(5).id();
+        Booking etterFørsteKall = tools.updateBookingStatus(id, BookingStatus.CONFIRMED);
+
+        assertEquals(
+                "Ulovlig statusovergang: CONFIRMED -> CONFIRMED",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.updateBookingStatus(id, BookingStatus.CONFIRMED))
+                        .getMessage());
+        assertEquals(etterFørsteKall, tools.getBooking(id));
+    }
+
+    /** Kansellering er lovlig fra alle tre ikke-terminale statusene. */
+    @Test
+    void cancelsFromEveryNonTerminalStatus() {
+        long fraPending = bookingStartingOn(5).id();
+
+        long fraConfirmed = bookingStartingOn(10).id();
+        tools.updateBookingStatus(fraConfirmed, BookingStatus.CONFIRMED);
+
+        long fraPaid = bookingStartingOn(15).id();
+        tools.updateBookingStatus(fraPaid, BookingStatus.CONFIRMED);
+        tools.updateBookingStatus(fraPaid, BookingStatus.PAID);
+
+        for (long id : new long[] {fraPending, fraConfirmed, fraPaid}) {
+            assertEquals(
+                    BookingStatus.CANCELLED,
+                    tools.updateBookingStatus(id, BookingStatus.CANCELLED).status());
+        }
+
+        // CANCELLED er også en endestasjon — en kansellert booking kan ikke gjenopplives.
+        assertEquals(
+                "Ulovlig statusovergang: CANCELLED -> CONFIRMED",
+                assertThrows(
+                                ValidationException.class,
+                                () -> tools.updateBookingStatus(fraPending, BookingStatus.CONFIRMED))
+                        .getMessage());
+    }
+
+    /** Ukjent id: samme {@code NotFoundException} som i T-08, og ingenting endres. */
+    @Test
+    void rejectsStatusUpdateForAnUnknownBookingId() {
+        assertEquals(
+                "Fant ingen booking med id 999",
+                assertThrows(
+                                NotFoundException.class,
+                                () -> tools.updateBookingStatus(999L, BookingStatus.CONFIRMED))
+                        .getMessage());
+    }
 }
